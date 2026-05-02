@@ -26,8 +26,17 @@ image-style-transfer/
 ### Local / Colab
 
 ```bash
+uv sync
+```
+
+or, without uv:
+
+```bash
 pip install -r requirements.txt
 ```
+
+The Colab notebooks install their own runtime dependencies with `uv pip install --system`
+before mounting Google Drive.
 
 ### EC2 (Docker)
 
@@ -103,6 +112,7 @@ hf_dataset_controlnet/
 
 ### 1. Preprocess
 Run `notebooks/01_preprocessing.ipynb` on Colab (mounts Drive, reads `Images/`, writes `processedImages/` and `img_labels.csv`).
+The generated `img_labels.csv` uses `file_name` for the processed JPEG filename consumed by alignment and preserves the raw upload name in `original_file_name`.
 
 ### 2. Align
 ```bash
