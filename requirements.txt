@@ -1,0 +1,25 @@
+# Core ML
+torch>=2.2.0
+torchvision>=0.17.0
+
+# Diffusion models
+diffusers==0.27.2
+transformers>=4.38.0
+accelerate>=0.27.0
+peft>=0.9.0
+
+# ControlNet preprocessing
+controlnet-aux>=0.0.7
+
+# Image processing
+opencv-python-headless>=4.9.0
+pillow>=10.0.0
+pillow-heif>=0.15.0
+scikit-image>=0.22.0
+
+# Data / evaluation
+pandas>=2.0.0
+lpips>=0.1.4
+
+# Local audit app
+streamlit>=1.32.0

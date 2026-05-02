@@ -1,0 +1,39 @@
+# Data files (live on Google Drive, not in repo)
+*.HEIC
+*.heic
+*.JPG
+*.jpg
+*.jpeg
+*.png
+*.PNG
+data/
+
+# Model checkpoints
+checkpoints/
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.ckpt
+lora_weights/
+
+# Outputs
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
