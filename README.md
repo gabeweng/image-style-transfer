@@ -59,8 +59,17 @@ All raw images (`*.HEIC`, `*.JPG`) and CSV files live on Google Drive:
 ```
 CIS_5190_group_project/
 ├── Images/              raw photos
-├── processedImages/     center-cropped outputs from notebook 01
+├── processedImages/     center-cropped outputs from notebook 00
 ├── aligned/             homography-aligned outputs from align_images.py
+├── data/
+│   ├── hf_dataset/
+│   └── hf_dataset_controlnet/
+├── checkpoints/
+│   ├── classifier_best.pt
+│   ├── classifier_last.pt
+│   ├── lora/
+│   └── controlnet/
+├── outputs/             generated images and evaluation_summary.png
 ├── img_labels.csv
 ├── aligned_labels.csv
 └── lpips_eval_set.csv
@@ -117,6 +126,20 @@ The generated `img_labels.csv` uses `file_name` for the processed JPEG filename 
 
 After preprocessing, `notebooks/01_pipeline_colab.ipynb` can run alignment, dataset creation, classifier training, LoRA/ControlNet training, inference, and evaluation from Colab with Drive-backed checkpoints, resume-from-latest training, tqdm progress bars, and optional Weights & Biases logging.
 
+### Recommended Colab workflow
+
+Run the pipeline in stages rather than running the entire notebook blindly:
+
+1. Run `00_preprocessing.ipynb` once to create `processedImages/` and `img_labels.csv`.
+2. Run `01_pipeline_colab.ipynb` sections 1-10 to align images and build both HuggingFace datasets.
+3. Run classifier training to create `checkpoints/classifier_best.pt` and `checkpoints/classifier_last.pt`.
+4. Run LoRA and/or ControlNet training. These sections checkpoint every 100 steps, keep the latest 3 checkpoints, and resume from `latest` after a Colab disconnect.
+5. Create or load `lpips_eval_set.csv`.
+6. Run inference, which executes `02_inference.ipynb` and writes generated images under `outputs/`.
+7. Run evaluation, which executes `03_evaluate.ipynb` and writes `outputs/evaluation_summary.png`.
+
+For quick baseline results, train the classifier first, skip LoRA/ControlNet training, then run inference and evaluation. For final project results, train the classifier, LoRA, and optionally ControlNet before inference.
+
 ### 2. Align
 ```bash
 # EC2 or Colab
@@ -149,9 +172,10 @@ python scripts/train_classifier.py \
     --labels_csv /workspace/data/aligned_labels.csv \
     --output_dir /workspace/checkpoints \
     --epochs 20 \
-    --batch_size 32
+    --batch_size 32 \
+    --resume
 ```
-Saves `checkpoints/classifier_best.pt`.
+Saves `checkpoints/classifier_last.pt` every epoch and `checkpoints/classifier_best.pt` when validation accuracy improves.
 
 ### LoRA fine-tuning on Penn campus images
 ```bash
@@ -167,7 +191,9 @@ accelerate launch \
   --lr_scheduler="cosine" \
   --mixed_precision="fp16" \
   --gradient_checkpointing \
-  --checkpointing_steps=500 \
+  --checkpointing_steps=100 \
+  --checkpoints_total_limit=3 \
+  --resume_from_checkpoint="latest" \
   --caption_column="text"
 ```
 
@@ -183,6 +209,9 @@ accelerate launch \
   --num_train_epochs=5 \
   --mixed_precision="fp16" \
   --gradient_checkpointing \
+  --checkpointing_steps=100 \
+  --checkpoints_total_limit=3 \
+  --resume_from_checkpoint="latest" \
   --conditioning_image_column="conditioning_images" \
   --image_column="images" \
   --caption_column="text"
@@ -199,14 +228,38 @@ Then run `notebooks/03_evaluate.ipynb` to compute LPIPS and Condition Accuracy a
 | Metric | Description |
 |--------|-------------|
 | **LPIPS ↓** | Perceptual similarity to ground-truth (AlexNet, `lpips` library) |
-| **Condition Accuracy ↑** | % of generated images classified as target condition by `classifier_best.pt` |
+| **ToD Accuracy ↑** | % of generated images classified as the target time of day by `classifier_best.pt` |
+| **Weather Accuracy ↑** | % of generated images classified as the target weather by `classifier_best.pt` |
+
+The evaluation notebook prints a table with one row per model:
+
+```
+Model | LPIPS ↓ | LPIPS std | ToD Acc ↑ | Weather Acc ↑ | N
+```
+
+It also writes `outputs/evaluation_summary.png`. Lower LPIPS is better; higher condition accuracy is better.
+
+### Final expected artifacts
+
+After a full run, the main deliverables are:
+
+```
+outputs/
+├── sd_baseline/
+├── instructpix2pix/
+├── controlnet/
+├── controlnet_lora/
+└── evaluation_summary.png
+```
+
+The generated image folders support qualitative comparison. The evaluation table and `evaluation_summary.png` are the quantitative final result.
 
 ---
 
 ## Reproducibility
 
 ```bash
-# Full pipeline (EC2)
+# Full pipeline after preprocessing
 python scripts/align_images.py        [args]
 python scripts/prepare_hf_dataset.py  [args]
 python scripts/train_classifier.py    [args]
