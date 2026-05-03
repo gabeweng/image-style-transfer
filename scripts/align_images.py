@@ -19,6 +19,7 @@ Colab: set IMAGES_DIR / LABELS_CSV / OUTPUT_DIR / OUTPUT_CSV at the top of
 
 import argparse
 import os
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -31,9 +32,20 @@ register_heif_opener()
 
 ANCHOR_TOD = "daytime"
 ANCHOR_WEATHER = "clear"
-MIN_GOOD_MATCHES = 10
-RANSAC_THRESH = 5.0
-LOWE_RATIO = 0.7
+
+
+@dataclass
+class AlignConfig:
+    lowe_ratio: float = 0.7
+    ransac_thresh: float = 4.0
+    min_good_matches: int = 40
+    min_inliers: int = 25
+    min_inlier_ratio: float = 0.25
+    max_scale_change: float = 4.0
+    max_rotation_deg: float = 45.0
+    sift_features: int = 8000
+    flann_checks: int = 100
+    anchor_strategy: str = "condition"
 
 
 def load_image_bgr(path: str) -> np.ndarray:
@@ -54,25 +66,142 @@ def pick_anchor(group: pd.DataFrame) -> pd.Series | None:
     return candidates.iloc[0]
 
 
-def compute_homography(ref_gray, img_gray):
-    sift = cv2.SIFT_create()
+def compute_homography(ref_gray, img_gray, config: AlignConfig):
+    sift = cv2.SIFT_create(nfeatures=config.sift_features)
     kp_ref, des_ref = sift.detectAndCompute(ref_gray, None)
     kp_img, des_img = sift.detectAndCompute(img_gray, None)
 
     if des_ref is None or des_img is None:
-        return None, 0
+        return None, {
+            "good_matches": 0,
+            "inliers": 0,
+            "inlier_ratio": 0.0,
+            "reason": "missing_descriptors",
+        }
 
-    flann = cv2.FlannBasedMatcher({"algorithm": 1, "trees": 5}, {"checks": 50})
-    matches = flann.knnMatch(des_ref, des_img, k=2)
-    good = [m for m, n in matches if m.distance < LOWE_RATIO * n.distance]
+    # RootSIFT improves match distinctiveness under lighting changes.
+    des_ref = rootsift(des_ref)
+    des_img = rootsift(des_img)
 
-    if len(good) < MIN_GOOD_MATCHES:
-        return None, len(good)
+    flann = cv2.FlannBasedMatcher({"algorithm": 1, "trees": 5}, {"checks": config.flann_checks})
+    matches_fwd = flann.knnMatch(des_ref, des_img, k=2)
+    matches_rev = flann.knnMatch(des_img, des_ref, k=2)
+
+    good_fwd = ratio_filter(matches_fwd, config.lowe_ratio)
+    good_rev = ratio_filter(matches_rev, config.lowe_ratio)
+
+    # Mutual nearest-neighbor check removes many one-off false correspondences.
+    rev_pairs = {(m.trainIdx, m.queryIdx) for m in good_rev}
+    good = [m for m in good_fwd if (m.queryIdx, m.trainIdx) in rev_pairs]
+
+    if len(good) < config.min_good_matches:
+        return None, {
+            "good_matches": len(good),
+            "inliers": 0,
+            "inlier_ratio": 0.0,
+            "reason": "not_enough_good_matches",
+        }
 
     src_pts = np.float32([kp_ref[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
     dst_pts = np.float32([kp_img[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-    M, _ = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, RANSAC_THRESH)
-    return M, len(good)
+    M, mask = cv2.findHomography(
+        dst_pts,
+        src_pts,
+        cv2.RANSAC,
+        config.ransac_thresh,
+        maxIters=5000,
+        confidence=0.995,
+    )
+    if M is None or mask is None:
+        return None, {
+            "good_matches": len(good),
+            "inliers": 0,
+            "inlier_ratio": 0.0,
+            "reason": "homography_failed",
+        }
+
+    inliers = int(mask.ravel().sum())
+    inlier_ratio = inliers / len(good)
+    if inliers < config.min_inliers or inlier_ratio < config.min_inlier_ratio:
+        return None, {
+            "good_matches": len(good),
+            "inliers": inliers,
+            "inlier_ratio": inlier_ratio,
+            "reason": "too_few_inliers",
+        }
+
+    sane, reason = homography_is_sane(M, img_gray.shape, ref_gray.shape, config)
+    if not sane:
+        return None, {
+            "good_matches": len(good),
+            "inliers": inliers,
+            "inlier_ratio": inlier_ratio,
+            "reason": reason,
+        }
+
+    return M, {
+        "good_matches": len(good),
+        "inliers": inliers,
+        "inlier_ratio": inlier_ratio,
+        "reason": "ok",
+    }
+
+
+def rootsift(des: np.ndarray) -> np.ndarray:
+    des = des.astype(np.float32)
+    des /= des.sum(axis=1, keepdims=True) + 1e-7
+    return np.sqrt(des)
+
+
+def ratio_filter(matches, lowe_ratio: float):
+    good = []
+    for pair in matches:
+        if len(pair) < 2:
+            continue
+        m, n = pair
+        if m.distance < lowe_ratio * n.distance:
+            good.append(m)
+    return good
+
+
+def homography_is_sane(
+    M: np.ndarray,
+    src_shape: tuple[int, int],
+    dst_shape: tuple[int, int],
+    config: AlignConfig,
+) -> tuple[bool, str]:
+    src_h, src_w = src_shape
+    dst_h, dst_w = dst_shape
+    corners = np.float32([
+        [0, 0],
+        [src_w - 1, 0],
+        [src_w - 1, src_h - 1],
+        [0, src_h - 1],
+    ]).reshape(-1, 1, 2)
+    warped = cv2.perspectiveTransform(corners, M).reshape(-1, 2)
+    area = abs(cv2.contourArea(warped.astype(np.float32)))
+    src_area = src_w * src_h
+    if area <= 0:
+        return False, "degenerate_warp"
+    scale = area / src_area
+    if scale < 1 / config.max_scale_change or scale > config.max_scale_change:
+        return False, "scale_out_of_bounds"
+
+    # Estimate local rotation from the top edge. This catches dramatic wrong flips.
+    dx, dy = warped[1] - warped[0]
+    angle = abs(np.degrees(np.arctan2(dy, dx)))
+    angle = min(angle, abs(180 - angle))
+    if angle > config.max_rotation_deg:
+        return False, "rotation_out_of_bounds"
+
+    # Require at least some overlap with the reference canvas.
+    x0, y0 = warped.min(axis=0)
+    x1, y1 = warped.max(axis=0)
+    overlap_w = max(0, min(x1, dst_w) - max(x0, 0))
+    overlap_h = max(0, min(y1, dst_h) - max(y0, 0))
+    if overlap_w * overlap_h < 0.1 * dst_w * dst_h:
+        return False, "low_canvas_overlap"
+    return True, "ok"
 
 
 def align_location_group(
@@ -80,11 +209,15 @@ def align_location_group(
     images_dir: str,
     output_dir: str,
     target_size: tuple[int, int],
+    config: AlignConfig,
 ) -> list[dict]:
     anchor_row = pick_anchor(group)
     if anchor_row is None:
         print(f"  [SKIP] No anchor candidate for location '{group.iloc[0]['location']}'")
         return []
+
+    if config.anchor_strategy == "best":
+        anchor_row = pick_best_anchor(group, images_dir, config) or anchor_row
 
     anchor_path = os.path.join(images_dir, anchor_row["file_name"])
     if not os.path.exists(anchor_path):
@@ -110,9 +243,13 @@ def align_location_group(
         target_bgr = load_image_bgr(target_path)
         target_gray = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2GRAY)
 
-        M, n_matches = compute_homography(anchor_gray, target_gray)
+        M, stats = compute_homography(anchor_gray, target_gray, config)
         if M is None:
-            print(f"  [FAIL] homography for {row['file_name']} ({n_matches} matches)")
+            print(
+                f"  [FAIL] homography for {row['file_name']} "
+                f"(good={stats['good_matches']}, inliers={stats['inliers']}, "
+                f"ratio={stats['inlier_ratio']:.2f}, reason={stats['reason']})"
+            )
             continue
 
         warped = cv2.warpPerspective(target_bgr, M, (w, h))
@@ -125,7 +262,7 @@ def align_location_group(
         records.append({
             "row": row,
             "warped": warped,
-            "n_matches": n_matches,
+            "stats": stats,
         })
 
     if not records:
@@ -148,7 +285,7 @@ def align_location_group(
         warped = rec["warped"]
         cropped = cv2.resize(warped[y:y+ch, x:x+cw], target_size)
 
-        stem = os.path.splitext(row["file_name"])[0]
+        stem = os.path.splitext(os.path.basename(row["file_name"]))[0]
         out_name = f"{stem}_aligned.jpg"
         out_path = os.path.join(output_dir, out_name)
         cv2.imwrite(out_path, cropped)
@@ -167,15 +304,70 @@ def align_location_group(
             "target_weather": row["weather"],
             "warped_path": out_name,
             "ssim_score": round(ssim_score, 4),
-            "n_matches": rec["n_matches"],
+            "n_matches": rec["stats"]["good_matches"],
+            "n_inliers": rec["stats"]["inliers"],
+            "inlier_ratio": round(rec["stats"]["inlier_ratio"], 4),
         })
-        print(f"  [OK] {row['file_name']} → SSIM={ssim_score:.3f}, matches={rec['n_matches']}")
+        print(
+            f"  [OK] {row['file_name']} → SSIM={ssim_score:.3f}, "
+            f"good={rec['stats']['good_matches']}, "
+            f"inliers={rec['stats']['inliers']}, "
+            f"ratio={rec['stats']['inlier_ratio']:.2f}"
+        )
 
     return results
 
 
-def align_all(images_dir: str, labels_csv: str, output_dir: str, output_csv: str, size: int = 512):
+def pick_best_anchor(group: pd.DataFrame, images_dir: str, config: AlignConfig) -> pd.Series | None:
+    cache = {}
+    rows = list(group.iterrows())
+    best_idx = None
+    best_score = -1
+
+    for idx_ref, ref_row in rows:
+        ref_path = os.path.join(images_dir, ref_row["file_name"])
+        if not os.path.exists(ref_path):
+            continue
+        if idx_ref not in cache:
+            ref_bgr = load_image_bgr(ref_path)
+            cache[idx_ref] = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2GRAY)
+        ref_gray = cache[idx_ref]
+
+        score = 0
+        for idx_img, img_row in rows:
+            if idx_img == idx_ref:
+                continue
+            img_path = os.path.join(images_dir, img_row["file_name"])
+            if not os.path.exists(img_path):
+                continue
+            if idx_img not in cache:
+                img_bgr = load_image_bgr(img_path)
+                cache[idx_img] = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            _, stats = compute_homography(ref_gray, cache[idx_img], config)
+            score += stats["inliers"]
+
+        if score > best_score:
+            best_idx = idx_ref
+            best_score = score
+
+    if best_idx is None:
+        return None
+
+    row = group.loc[best_idx]
+    print(f"  [ANCHOR] selected {row['file_name']} by best connectivity (score={best_score})")
+    return row
+
+
+def align_all(
+    images_dir: str,
+    labels_csv: str,
+    output_dir: str,
+    output_csv: str,
+    size: int = 512,
+    config: AlignConfig | None = None,
+):
     os.makedirs(output_dir, exist_ok=True)
+    config = config or AlignConfig()
     df = pd.read_csv(labels_csv)
     df["time_of_day"] = df["time_of_day"].str.lower().str.strip()
     df["weather"] = df["weather"].str.lower().str.strip()
@@ -183,7 +375,7 @@ def align_all(images_dir: str, labels_csv: str, output_dir: str, output_csv: str
     all_records = []
     for location, group in df.groupby("location"):
         print(f"\nProcessing location: {location} ({len(group)} images)")
-        recs = align_location_group(group, images_dir, output_dir, (size, size))
+        recs = align_location_group(group, images_dir, output_dir, (size, size), config)
         all_records.extend(recs)
 
     out_df = pd.DataFrame(all_records)
@@ -199,6 +391,33 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", required=True, help="Folder to write aligned images")
     parser.add_argument("--output_csv", required=True, help="Path to write aligned_labels.csv")
     parser.add_argument("--size", type=int, default=512, help="Output image size (square)")
+    parser.add_argument("--lowe_ratio", type=float, default=0.7)
+    parser.add_argument("--ransac_thresh", type=float, default=4.0)
+    parser.add_argument("--min_good_matches", type=int, default=40)
+    parser.add_argument("--min_inliers", type=int, default=25)
+    parser.add_argument("--min_inlier_ratio", type=float, default=0.25)
+    parser.add_argument("--max_scale_change", type=float, default=4.0)
+    parser.add_argument("--max_rotation_deg", type=float, default=45.0)
+    parser.add_argument("--sift_features", type=int, default=8000)
+    parser.add_argument("--flann_checks", type=int, default=100)
+    parser.add_argument(
+        "--anchor_strategy",
+        choices=["condition", "best"],
+        default="condition",
+        help="'condition' uses daytime/clear fallback logic; 'best' selects the image with strongest pairwise connectivity.",
+    )
     args = parser.parse_args()
 
-    align_all(args.images_dir, args.labels_csv, args.output_dir, args.output_csv, args.size)
+    config = AlignConfig(
+        lowe_ratio=args.lowe_ratio,
+        ransac_thresh=args.ransac_thresh,
+        min_good_matches=args.min_good_matches,
+        min_inliers=args.min_inliers,
+        min_inlier_ratio=args.min_inlier_ratio,
+        max_scale_change=args.max_scale_change,
+        max_rotation_deg=args.max_rotation_deg,
+        sift_features=args.sift_features,
+        flann_checks=args.flann_checks,
+        anchor_strategy=args.anchor_strategy,
+    )
+    align_all(args.images_dir, args.labels_csv, args.output_dir, args.output_csv, args.size, config)

@@ -59,7 +59,7 @@ All raw images (`*.HEIC`, `*.JPG`) and CSV files live on Google Drive:
 ```
 CIS_5190_group_project/
 ├── Images/              raw photos
-├── processedImages/     center-cropped outputs from notebook 00
+├── processedImages/     orientation-corrected JPEGs from notebook 00
 ├── aligned/             homography-aligned outputs from align_images.py
 ├── data/
 │   ├── hf_dataset/
@@ -122,7 +122,19 @@ hf_dataset_controlnet/
 
 ### 1. Preprocess
 Run `notebooks/00_preprocessing.ipynb` on Colab (mounts Drive, reads `Images/`, writes `processedImages/` and `img_labels.csv`).
-The generated `img_labels.csv` uses `file_name` for the processed JPEG filename consumed by alignment and preserves the raw upload name in `original_file_name`.
+The preprocessing step applies EXIF orientation, converts each image to JPEG, and does not crop. Processed images are written in a nested layout:
+
+```
+processedImages/
+└── <location_index>/
+    └── <time_of_day>_<weather>/
+        └── <original_stem>.jpg
+```
+
+For example, a library photo assigned to location index `3` with `morning_clear` labels would be saved under `processedImages/3/morning_clear/...jpg`. The location index is deterministic, based on sorted location names, and is stored in `img_labels.csv`.
+
+The generated `img_labels.csv` uses `file_name` for the relative processed JPEG path consumed by alignment and preserves the raw upload name in `original_file_name`.
+Set `REDO_PREPROCESS = True` in the preprocessing cell to rebuild `img_labels.csv` and overwrite processed JPEGs during Colab reruns.
 
 After preprocessing, `notebooks/01_pipeline_colab.ipynb` can run alignment, dataset creation, classifier training, LoRA/ControlNet training, inference, and evaluation from Colab with Drive-backed checkpoints, resume-from-latest training, tqdm progress bars, and optional Weights & Biases logging.
 
@@ -150,6 +162,10 @@ python scripts/align_images.py \
     --output_csv /path/to/aligned_labels.csv \
     --size 512
 ```
+
+If some pairs align severely wrong, use the stricter matching knobs exposed in `notebooks/01_pipeline_colab.ipynb`. Start by setting `ALIGN_ANCHOR_STRATEGY = 'best'`, which chooses the image with the strongest pairwise connectivity inside each location group instead of always using the daytime/clear photo. For stricter matching, try `ALIGN_LOWE_RATIO = 0.65`, `ALIGN_RANSAC_THRESH = 3.0`, `ALIGN_MIN_GOOD_MATCHES = 60`, `ALIGN_MIN_INLIERS = 40`, and `ALIGN_MIN_INLIER_RATIO = 0.35`. If too many images fail to align, relax those values back toward the defaults.
+
+The alignment CSV includes `n_matches`, `n_inliers`, and `inlier_ratio`. Prefer pairs with higher inlier counts and inlier ratios; low values usually mean the transform is being estimated from weak or inconsistent points.
 
 ### 3. Audit
 ```bash
