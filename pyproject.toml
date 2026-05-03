@@ -24,7 +24,13 @@ dependencies = [
     "streamlit>=1.32.0",
     "ipykernel>=6.29.0",
     "jupyter>=1.0.0",
+    "matplotlib>=3.10.9",
 ]
 
 [tool.uv]
 package = false
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+]

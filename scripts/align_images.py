@@ -31,6 +31,7 @@ from skimage.metrics import structural_similarity as ssim
 register_heif_opener()
 
 ANCHOR_TOD = "daytime"
+ANCHOR_TOD_ALIASES = ("daytime", "day", "morning")
 ANCHOR_WEATHER = "clear"
 
 
@@ -46,6 +47,11 @@ class AlignConfig:
     sift_features: int = 8000
     flann_checks: int = 100
     anchor_strategy: str = "condition"
+    match_mode: str = "gray"
+    canny_low: int = 60
+    canny_high: int = 180
+    max_drift: float | None = None
+    drift_grid_step: int = 16
 
 
 def load_image_bgr(path: str) -> np.ndarray:
@@ -53,23 +59,46 @@ def load_image_bgr(path: str) -> np.ndarray:
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
 
+def prepare_match_image(gray: np.ndarray, config: AlignConfig) -> np.ndarray:
+    mode = config.match_mode
+    if mode == "gray":
+        return gray
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    normalized = clahe.apply(gray)
+    if mode == "clahe":
+        return normalized
+
+    blurred = cv2.GaussianBlur(normalized, (3, 3), 0)
+    edges = cv2.Canny(blurred, config.canny_low, config.canny_high)
+    if mode == "edges":
+        return edges
+    if mode == "clahe_edges":
+        return cv2.addWeighted(normalized, 0.65, edges, 0.35, 0)
+
+    raise ValueError(f"Unsupported match_mode: {mode}")
+
+
 def pick_anchor(group: pd.DataFrame) -> pd.Series | None:
     tod_col = group["time_of_day"].str.lower()
     wx_col = group["weather"].str.lower()
-    mask = (tod_col == ANCHOR_TOD) & (wx_col == ANCHOR_WEATHER)
+    mask = tod_col.isin(ANCHOR_TOD_ALIASES) & (wx_col == ANCHOR_WEATHER)
     candidates = group[mask]
     if candidates.empty:
-        # Fall back: any daytime shot
-        candidates = group[tod_col == ANCHOR_TOD]
+        # Fall back: any bright/daylike shot
+        candidates = group[tod_col.isin(ANCHOR_TOD_ALIASES)]
     if candidates.empty:
         return None
     return candidates.iloc[0]
 
 
 def compute_homography(ref_gray, img_gray, config: AlignConfig):
+    ref_match = prepare_match_image(ref_gray, config)
+    img_match = prepare_match_image(img_gray, config)
+
     sift = cv2.SIFT_create(nfeatures=config.sift_features)
-    kp_ref, des_ref = sift.detectAndCompute(ref_gray, None)
-    kp_img, des_img = sift.detectAndCompute(img_gray, None)
+    kp_ref, des_ref = sift.detectAndCompute(ref_match, None)
+    kp_img, des_img = sift.detectAndCompute(img_match, None)
 
     if des_ref is None or des_img is None:
         return None, {
@@ -93,6 +122,15 @@ def compute_homography(ref_gray, img_gray, config: AlignConfig):
     # Mutual nearest-neighbor check removes many one-off false correspondences.
     rev_pairs = {(m.trainIdx, m.queryIdx) for m in good_rev}
     good = [m for m in good_fwd if (m.queryIdx, m.trainIdx) in rev_pairs]
+    before_drift_filter = len(good)
+
+    if config.max_drift is not None and config.max_drift > 0:
+        good = [
+            m for m in good
+            if np.linalg.norm(
+                np.array(kp_ref[m.queryIdx].pt) - np.array(kp_img[m.trainIdx].pt)
+            ) <= config.max_drift
+        ]
 
     if len(good) < config.min_good_matches:
         return None, {
@@ -100,6 +138,7 @@ def compute_homography(ref_gray, img_gray, config: AlignConfig):
             "inliers": 0,
             "inlier_ratio": 0.0,
             "reason": "not_enough_good_matches",
+            "drift_filtered_matches": before_drift_filter - len(good),
         }
 
     src_pts = np.float32([kp_ref[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
@@ -118,6 +157,7 @@ def compute_homography(ref_gray, img_gray, config: AlignConfig):
             "inliers": 0,
             "inlier_ratio": 0.0,
             "reason": "homography_failed",
+            "drift_filtered_matches": before_drift_filter - len(good),
         }
 
     inliers = int(mask.ravel().sum())
@@ -128,6 +168,7 @@ def compute_homography(ref_gray, img_gray, config: AlignConfig):
             "inliers": inliers,
             "inlier_ratio": inlier_ratio,
             "reason": "too_few_inliers",
+            "drift_filtered_matches": before_drift_filter - len(good),
         }
 
     sane, reason = homography_is_sane(M, img_gray.shape, ref_gray.shape, config)
@@ -137,6 +178,7 @@ def compute_homography(ref_gray, img_gray, config: AlignConfig):
             "inliers": inliers,
             "inlier_ratio": inlier_ratio,
             "reason": reason,
+            "drift_filtered_matches": before_drift_filter - len(good),
         }
 
     return M, {
@@ -144,6 +186,7 @@ def compute_homography(ref_gray, img_gray, config: AlignConfig):
         "inliers": inliers,
         "inlier_ratio": inlier_ratio,
         "reason": "ok",
+        "drift_filtered_matches": before_drift_filter - len(good),
     }
 
 
@@ -194,6 +237,17 @@ def homography_is_sane(
     if angle > config.max_rotation_deg:
         return False, "rotation_out_of_bounds"
 
+    if config.max_drift is not None and config.max_drift > 0:
+        step = max(1, int(config.drift_grid_step))
+        xs = np.unique(np.concatenate([np.arange(0, src_w, step), [src_w - 1]])).astype(np.float32)
+        ys = np.unique(np.concatenate([np.arange(0, src_h, step), [src_h - 1]])).astype(np.float32)
+        grid_x, grid_y = np.meshgrid(xs, ys)
+        reference_points = np.column_stack([grid_x.ravel(), grid_y.ravel()]).astype(np.float32)
+        warped_points = cv2.perspectiveTransform(reference_points.reshape(-1, 1, 2), M).reshape(-1, 2)
+        drift = np.linalg.norm(warped_points - reference_points, axis=1)
+        if float(drift.max()) > config.max_drift:
+            return False, "drift_out_of_bounds"
+
     # Require at least some overlap with the reference canvas.
     x0, y0 = warped.min(axis=0)
     x1, y1 = warped.max(axis=0)
@@ -211,13 +265,10 @@ def align_location_group(
     target_size: tuple[int, int],
     config: AlignConfig,
 ) -> list[dict]:
-    anchor_row = pick_anchor(group)
+    anchor_row = pick_best_anchor(group, images_dir, config) if config.anchor_strategy == "best" else pick_anchor(group)
     if anchor_row is None:
         print(f"  [SKIP] No anchor candidate for location '{group.iloc[0]['location']}'")
         return []
-
-    if config.anchor_strategy == "best":
-        anchor_row = pick_best_anchor(group, images_dir, config) or anchor_row
 
     anchor_path = os.path.join(images_dir, anchor_row["file_name"])
     if not os.path.exists(anchor_path):
@@ -248,7 +299,9 @@ def align_location_group(
             print(
                 f"  [FAIL] homography for {row['file_name']} "
                 f"(good={stats['good_matches']}, inliers={stats['inliers']}, "
-                f"ratio={stats['inlier_ratio']:.2f}, reason={stats['reason']})"
+                f"ratio={stats['inlier_ratio']:.2f}, "
+                f"drift_filtered={stats.get('drift_filtered_matches', 0)}, "
+                f"reason={stats['reason']})"
             )
             continue
 
@@ -307,12 +360,14 @@ def align_location_group(
             "n_matches": rec["stats"]["good_matches"],
             "n_inliers": rec["stats"]["inliers"],
             "inlier_ratio": round(rec["stats"]["inlier_ratio"], 4),
+            "drift_filtered_matches": rec["stats"].get("drift_filtered_matches", 0),
         })
         print(
             f"  [OK] {row['file_name']} → SSIM={ssim_score:.3f}, "
             f"good={rec['stats']['good_matches']}, "
             f"inliers={rec['stats']['inliers']}, "
-            f"ratio={rec['stats']['inlier_ratio']:.2f}"
+            f"ratio={rec['stats']['inlier_ratio']:.2f}, "
+            f"drift_filtered={rec['stats'].get('drift_filtered_matches', 0)}"
         )
 
     return results
@@ -401,6 +456,26 @@ if __name__ == "__main__":
     parser.add_argument("--sift_features", type=int, default=8000)
     parser.add_argument("--flann_checks", type=int, default=100)
     parser.add_argument(
+        "--match_mode",
+        choices=["gray", "clahe", "edges", "clahe_edges"],
+        default="gray",
+        help="Image representation used for SIFT matching. Try clahe_edges for day/night pairs.",
+    )
+    parser.add_argument("--canny_low", type=int, default=60)
+    parser.add_argument("--canny_high", type=int, default=180)
+    parser.add_argument(
+        "--max_drift",
+        type=float,
+        default=None,
+        help="Maximum allowed pixel movement across a dense image grid. Set 0 or omit to disable.",
+    )
+    parser.add_argument(
+        "--drift_grid_step",
+        type=int,
+        default=16,
+        help="Pixel spacing for max_drift checks. Use 1 to check every pixel exactly; larger values are faster.",
+    )
+    parser.add_argument(
         "--anchor_strategy",
         choices=["condition", "best"],
         default="condition",
@@ -419,5 +494,10 @@ if __name__ == "__main__":
         sift_features=args.sift_features,
         flann_checks=args.flann_checks,
         anchor_strategy=args.anchor_strategy,
+        match_mode=args.match_mode,
+        canny_low=args.canny_low,
+        canny_high=args.canny_high,
+        max_drift=args.max_drift,
+        drift_grid_step=args.drift_grid_step,
     )
     align_all(args.images_dir, args.labels_csv, args.output_dir, args.output_csv, args.size, config)
