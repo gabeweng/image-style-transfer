@@ -28,6 +28,7 @@ from PIL import Image
 from pillow_heif import register_heif_opener
 from torch.utils.data import DataLoader, Dataset, random_split
 from torchvision import models, transforms
+from tqdm.auto import tqdm
 
 register_heif_opener()
 
@@ -85,7 +86,7 @@ class DualHeadResNet(nn.Module):
 # Training loop
 # ---------------------------------------------------------------------------
 
-def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split):
+def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split, resume):
     os.makedirs(output_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -129,12 +130,24 @@ def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     best_val_acc = 0.0
+    start_epoch = 1
 
-    for epoch in range(1, epochs + 1):
+    last_ckpt_path = os.path.join(output_dir, "classifier_last.pt")
+    if resume and os.path.exists(last_ckpt_path):
+        ckpt = torch.load(last_ckpt_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        best_val_acc = ckpt.get("best_val_acc", 0.0)
+        start_epoch = ckpt["epoch"] + 1
+        print(f"Resuming from {last_ckpt_path} at epoch {start_epoch}")
+
+    for epoch in range(start_epoch, epochs + 1):
         # --- Train ---
         model.train()
         total_loss = 0.0
-        for imgs, tod_labels, wx_labels in train_loader:
+        progress = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
+        for imgs, tod_labels, wx_labels in progress:
             imgs = imgs.to(device)
             tod_labels = tod_labels.to(device)
             wx_labels = wx_labels.to(device)
@@ -146,6 +159,7 @@ def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split)
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
+            progress.set_postfix(loss=f"{loss.item():.4f}")
 
         scheduler.step()
 
@@ -172,8 +186,24 @@ def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split)
             f"val tod={tod_acc:.3f} wx={wx_acc:.3f} avg={avg_acc:.3f}"
         )
 
-        if avg_acc > best_val_acc:
+        is_best = avg_acc > best_val_acc
+        if is_best:
             best_val_acc = avg_acc
+
+        torch.save({
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "tod_classes": TOD_CLASSES,
+            "wx_classes": WX_CLASSES,
+            "val_tod_acc": tod_acc,
+            "val_wx_acc": wx_acc,
+            "best_val_acc": best_val_acc,
+        }, last_ckpt_path)
+        print(f"  Saved latest checkpoint: {last_ckpt_path}")
+
+        if is_best:
             ckpt_path = os.path.join(output_dir, "classifier_best.pt")
             torch.save({
                 "epoch": epoch,
@@ -182,6 +212,7 @@ def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split)
                 "wx_classes": WX_CLASSES,
                 "val_tod_acc": tod_acc,
                 "val_wx_acc": wx_acc,
+                "best_val_acc": best_val_acc,
             }, ckpt_path)
             print(f"  ↳ Saved best checkpoint (avg_acc={avg_acc:.3f})")
 
@@ -198,6 +229,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--val_split", type=float, default=0.2)
+    parser.add_argument("--resume", action="store_true", help="Resume from classifier_last.pt if present")
     args = parser.parse_args()
 
     train(
@@ -208,4 +240,5 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         lr=args.lr,
         val_split=args.val_split,
+        resume=args.resume,
     )

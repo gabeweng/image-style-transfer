@@ -7,7 +7,8 @@ Transform UPenn campus images across time-of-day (daytime / sunset / night) and 
 ```
 image-style-transfer/
 ├── notebooks/
-│   ├── 01_preprocessing.ipynb      # HEIC→JPEG, build img_labels.csv
+│   ├── 00_preprocessing.ipynb      # HEIC→JPEG, build img_labels.csv
+│   ├── 01_pipeline_colab.ipynb     # Colab runner for alignment, datasets, training, inference, evaluation
 │   ├── 02_inference.ipynb          # all four models: SD baseline, IP2P, ControlNet, ControlNet+LoRA
 │   └── 03_evaluate.ipynb           # LPIPS + Condition Accuracy comparison table
 ├── scripts/
@@ -111,8 +112,10 @@ hf_dataset_controlnet/
 ## Data pipeline
 
 ### 1. Preprocess
-Run `notebooks/01_preprocessing.ipynb` on Colab (mounts Drive, reads `Images/`, writes `processedImages/` and `img_labels.csv`).
+Run `notebooks/00_preprocessing.ipynb` on Colab (mounts Drive, reads `Images/`, writes `processedImages/` and `img_labels.csv`).
 The generated `img_labels.csv` uses `file_name` for the processed JPEG filename consumed by alignment and preserves the raw upload name in `original_file_name`.
+
+After preprocessing, `notebooks/01_pipeline_colab.ipynb` can run alignment, dataset creation, classifier training, LoRA/ControlNet training, inference, and evaluation from Colab with Drive-backed checkpoints, resume-from-latest training, tqdm progress bars, and optional Weights & Biases logging.
 
 ### 2. Align
 ```bash

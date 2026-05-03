@@ -21,6 +21,8 @@ scikit-image>=0.22.0
 # Data / evaluation
 pandas>=2.0.0
 lpips>=0.1.4
+tqdm>=4.66.0
+wandb>=0.16.0
 
 # Local audit app
 streamlit>=1.32.0
