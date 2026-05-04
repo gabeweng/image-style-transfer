@@ -3,13 +3,16 @@ audit_app.py  —  Streamlit alignment verification tool
 
 Run locally:
     streamlit run scripts/audit_app.py -- \
-        --aligned_csv  /path/to/aligned_labels.csv \
+        --pairs_csv    /path/to/pair_review.csv \
         --aligned_dir  /path/to/aligned \
         --eval_csv     /path/to/lpips_eval_set.csv
 
 The app lets you scrub through anchor/warped pairs per location,
 blend them with a slider to spot geometry errors, and approve or
 reject each pair for the strict LPIPS evaluation set.
+
+This is a legacy pair-curation helper. The active dataset-prep path is
+scripts/preprocess.py, which writes manifest.csv and hf_dataset/.
 """
 
 import argparse
@@ -25,12 +28,12 @@ from PIL import Image
 # CLI args (Streamlit passes everything after "--" to the script)
 # ---------------------------------------------------------------------------
 parser = argparse.ArgumentParser(add_help=False)
-parser.add_argument("--aligned_csv", default="aligned_labels.csv")
+parser.add_argument("--pairs_csv", default="pair_review.csv")
 parser.add_argument("--aligned_dir", default="aligned")
 parser.add_argument("--eval_csv", default="lpips_eval_set.csv")
 args, _ = parser.parse_known_args()
 
-ALIGNED_CSV = args.aligned_csv
+PAIRS_CSV = args.pairs_csv
 ALIGNED_DIR = args.aligned_dir
 EVAL_CSV = args.eval_csv
 
@@ -72,12 +75,11 @@ def save_eval_set(df, path):
 st.set_page_config(page_title="Alignment Audit", layout="wide")
 st.title("Alignment Audit — LPIPS Pair Curation")
 
-if not os.path.exists(ALIGNED_CSV):
-    st.error(f"aligned_labels.csv not found at: {ALIGNED_CSV}\n"
-             "Run `python scripts/align_images.py` first.")
+if not os.path.exists(PAIRS_CSV):
+    st.error(f"Pair review CSV not found at: {PAIRS_CSV}")
     st.stop()
 
-df = load_aligned_df(ALIGNED_CSV)
+df = load_aligned_df(PAIRS_CSV)
 eval_df = load_eval_set(EVAL_CSV)
 
 # Sidebar — location selector

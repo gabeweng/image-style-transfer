@@ -9,8 +9,8 @@ Combined loss: L = L_tod + L_weather
 
 Usage (EC2 / Colab):
     python scripts/train_classifier.py \
-        --images_dir   /path/to/aligned \
-        --labels_csv   /path/to/aligned_labels.csv \
+        --images_dir   /path/to/CIS_5190_group_project \
+        --labels_csv   /path/to/manifest.csv \
         --output_dir   checkpoints/ \
         --epochs       20 \
         --batch_size   32
@@ -43,6 +43,28 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 # Dataset
 # ---------------------------------------------------------------------------
 
+def load_label_frame(labels_csv: str) -> pd.DataFrame:
+    df = pd.read_csv(labels_csv)
+
+    if {"status", "file_name", "time_of_day", "weather"}.issubset(df.columns):
+        df = df[df["status"] == "kept"].copy()
+        df["image_file"] = df["file_name"]
+        return df
+
+    # Backward-compatible fallback for older pair CSVs.
+    if {"warped_path", "target_tod", "target_weather"}.issubset(df.columns):
+        df = df.copy()
+        df["image_file"] = df["warped_path"]
+        df["time_of_day"] = df["target_tod"]
+        df["weather"] = df["target_weather"]
+        return df
+
+    raise ValueError(
+        "Unsupported labels CSV. Expected manifest.csv with status/file_name/time_of_day/weather "
+        "or an older pair CSV with warped_path/target_tod/target_weather."
+    )
+
+
 class ConditionDataset(Dataset):
     def __init__(self, df: pd.DataFrame, images_dir: str, transform):
         self.df = df.reset_index(drop=True)
@@ -54,12 +76,12 @@ class ConditionDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        path = os.path.join(self.images_dir, row["warped_path"])
+        path = os.path.join(self.images_dir, row["image_file"])
         img = Image.open(path).convert("RGB")
         img = self.transform(img)
 
-        tod_label = TOD_CLASSES.index(row["target_tod"].lower())
-        wx_label = WX_CLASSES.index(row["target_weather"].lower())
+        tod_label = TOD_CLASSES.index(row["time_of_day"].lower())
+        wx_label = WX_CLASSES.index(row["weather"].lower())
         return img, tod_label, wx_label
 
 
@@ -91,13 +113,16 @@ def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split,
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    df = pd.read_csv(labels_csv)
-    df["target_tod"] = df["target_tod"].str.lower().str.strip()
-    df["target_weather"] = df["target_weather"].str.lower().str.strip()
+    df = load_label_frame(labels_csv)
+    df["time_of_day"] = df["time_of_day"].str.lower().str.strip()
+    df["weather"] = df["weather"].str.lower().str.strip()
 
     # Drop rows whose label isn't in our class lists
-    df = df[df["target_tod"].isin(TOD_CLASSES) & df["target_weather"].isin(WX_CLASSES)]
+    df = df[df["time_of_day"].isin(TOD_CLASSES) & df["weather"].isin(WX_CLASSES)]
+    df = df[df["image_file"].apply(lambda p: os.path.exists(os.path.join(images_dir, p)))]
     print(f"Dataset size after filtering: {len(df)}")
+    if df.empty:
+        raise ValueError("No classifier training rows found. Check --images_dir and --labels_csv.")
 
     train_tf = transforms.Compose([
         transforms.RandomHorizontalFlip(),
@@ -114,12 +139,14 @@ def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split,
         transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
     ])
 
-    full_ds = ConditionDataset(df, images_dir, train_tf)
-    val_size = max(1, int(len(full_ds) * val_split))
-    train_size = len(full_ds) - val_size
-    train_ds, val_ds = random_split(full_ds, [train_size, val_size])
-    val_ds.dataset = ConditionDataset(df.iloc[val_ds.indices].reset_index(drop=True),
-                                      images_dir, val_tf)
+    val_size = max(1, int(len(df) * val_split))
+    train_size = len(df) - val_size
+    generator = torch.Generator().manual_seed(42)
+    train_subset, val_subset = random_split(df.reset_index(drop=True), [train_size, val_size], generator=generator)
+    train_df = df.iloc[train_subset.indices].reset_index(drop=True)
+    val_df = df.iloc[val_subset.indices].reset_index(drop=True)
+    train_ds = ConditionDataset(train_df, images_dir, train_tf)
+    val_ds = ConditionDataset(val_df, images_dir, val_tf)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
@@ -222,8 +249,8 @@ def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--images_dir", required=True, help="Folder with aligned images")
-    parser.add_argument("--labels_csv", required=True, help="aligned_labels.csv (or img_labels.csv)")
+    parser.add_argument("--images_dir", required=True, help="Dataset base folder. For manifest.csv, pass the project base directory.")
+    parser.add_argument("--labels_csv", required=True, help="manifest.csv from scripts/preprocess.py or the notebook")
     parser.add_argument("--output_dir", default="checkpoints", help="Where to save checkpoints")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=32)
