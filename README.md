@@ -64,9 +64,10 @@ Examples:
 agh3rd_day_cloudy.jpg
 arch_night_clear_2.HEIC
 vp_sunset_cloudy.JPG
+castle_night_clear_ai.png
 ```
 
-The preprocessing pipeline parses `location`, `time_of_day`, and `weather` from the filename, generates stable captions, and records every uploaded image in `manifest.csv`.
+The optional trailing `_ai` marks synthetic images and is recorded in `manifest.csv` as `is_synthetic=True`. The preprocessing pipeline parses `location`, `time_of_day`, and `weather` from the filename, generates stable captions, and records every uploaded image in `manifest.csv`.
 
 ## Main Preprocessing Workflow
 
@@ -82,7 +83,7 @@ Both paths produce the same core outputs: `processedImages/`, `aligned/`, `filte
 
 The preprocessing pipeline performs the full sequence:
 
-1. Converts raw uploads into standardized JPEGs under `processedImages/`.
+1. Converts raw uploads into standardized JPEGs under `processedImages/<location>/<time>_<weather>/`.
 2. Builds and updates `manifest.csv`.
 3. Aligns each location group with feature matching and homography.
 4. Crops black or invalid warp areas using a uniform group crop.
@@ -102,7 +103,7 @@ OUTPUT_SIZE = 512
 MIN_SHARED_CROP_AREA_RATIO = 0.50
 ```
 
-When a `REDO_*` flag is `True`, the corresponding outputs are rebuilt. When it is `False`, the notebook checks whether the expected files already exist and skips completed work.
+When a `REDO_*` flag is `True`, the corresponding output folder is replaced. When it is `False`, the notebook checks whether the expected files already exist and skips completed work; rerun stages create missing directories and use unique output names instead of deleting existing image folders.
 
 The script exposes equivalent flags:
 
@@ -124,11 +125,14 @@ file_name
 location
 time_of_day
 weather
+is_synthetic
 caption
 source_file
 original_file_name
+anchor_file
 crop_w
 crop_h
+crop_area_ratio
 matches
 inliers
 inlier_ratio
@@ -139,6 +143,8 @@ drop_reason
 ```
 
 Use `status == "kept"` for the final training images. Other statuses explain what happened to non-final images, such as `alignment_failed`, `crop_dropped`, or `duplicate_filtered`.
+
+For alignment and crop auditing, `anchor_file` records the processed image used as the location-group anchor, and `crop_area_ratio` records the retained shared crop area relative to that anchor. These fields make it easier to review `crop_dropped` and `alignment_failed` rows later.
 
 ## Hugging Face Dataset
 

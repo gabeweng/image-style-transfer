@@ -38,11 +38,14 @@ MANIFEST_COLUMNS = [
     "location",
     "time_of_day",
     "weather",
+    "is_synthetic",
     "caption",
     "source_file",
     "original_file_name",
+    "anchor_file",
     "crop_w",
     "crop_h",
+    "crop_area_ratio",
     "matches",
     "inliers",
     "inlier_ratio",
@@ -53,8 +56,34 @@ MANIFEST_COLUMNS = [
 ]
 
 VALID_IMAGE_SUFFIXES = {".heic", ".heif", ".jpg", ".jpeg", ".png"}
-FILENAME_PATTERN = re.compile(r"^([^_]+)_([^_]+)_([a-zA-Z]+)")
+FILENAME_PATTERN = re.compile(
+    r"^(?P<location>[A-Za-z0-9]+)_(?P<time>[A-Za-z0-9]+)_(?P<weather>[A-Za-z0-9]+)(?P<rest>.*?)(?P<synthetic>_ai)?$",
+    re.IGNORECASE,
+)
 DAYLIKE = {"daytime", "day", "morning"}
+TIME_ALIASES = {
+    "day": "daytime",
+    "daytime": "daytime",
+    "morning": "daytime",
+    "afternoon": "daytime",
+    "noon": "daytime",
+    "sunset": "sunset",
+    "dusk": "sunset",
+    "evening": "sunset",
+    "night": "night",
+    "nighttime": "night",
+}
+WEATHER_ALIASES = {
+    "clear": "clear",
+    "sunny": "clear",
+    "cloudy": "cloudy",
+    "overcast": "cloudy",
+    "rain": "rainy",
+    "rainy": "rainy",
+    "wet": "rainy",
+    "snow": "snowy",
+    "snowy": "snowy",
+}
 
 
 @dataclass
@@ -144,7 +173,7 @@ def split_for_location(location) -> str:
     return "val" if sum(ord(ch) for ch in str(location).lower()) % 5 == 0 else "train"
 
 
-def ensure_empty_dir(path: str) -> None:
+def replace_dir(path: str) -> None:
     if os.path.isdir(path):
         shutil.rmtree(path)
     os.makedirs(path, exist_ok=True)
@@ -162,7 +191,9 @@ def manifest_record_from_row(
     stats: dict | None = None,
     crop_w="",
     crop_h="",
+    crop_area_ratio="",
     representative_score="",
+    anchor_file="",
 ) -> dict:
     stats = stats or {}
     row_get = row.get if hasattr(row, "get") else dict(row).get
@@ -176,14 +207,19 @@ def manifest_record_from_row(
         "location": row_get("location", ""),
         "time_of_day": row_get("time_of_day", ""),
         "weather": row_get("weather", ""),
+        "is_synthetic": row_get("is_synthetic", ""),
         "caption": row_get(
             "caption",
             caption_from_labels(row_get("location", ""), row_get("time_of_day", ""), row_get("weather", "")),
         ),
         "source_file": row_get("source_file", row_get("file_name", "")),
         "original_file_name": row_get("original_file_name", ""),
+        "anchor_file": anchor_file if anchor_file != "" else row_get("anchor_file", ""),
         "crop_w": crop_w if crop_w != "" else row_get("crop_w", ""),
         "crop_h": crop_h if crop_h != "" else row_get("crop_h", ""),
+        "crop_area_ratio": crop_area_ratio
+        if crop_area_ratio != ""
+        else stats.get("crop_area_ratio", row_get("crop_area_ratio", "")),
         "matches": stats.get("matches", row_get("matches", "")),
         "inliers": stats.get("inliers", row_get("inliers", "")),
         "inlier_ratio": inlier_ratio,
@@ -224,12 +260,46 @@ def summarize_manifest(df: pd.DataFrame, title: str, path_base: str | None = Non
 
 
 def parse_filename(fname: str):
-    match = FILENAME_PATTERN.match(fname)
+    stem = Path(fname).stem.strip()
+    stem = re.sub(r"\s*\((\d+)\)\s*$", r"_\1", stem)
+    match = FILENAME_PATTERN.match(stem)
     if not match:
         return None
-    location, tod, weather = match.groups()
-    weather = "rainy" if weather.lower() == "rain" else weather.lower()
-    return location.lower(), tod.lower(), weather, clean_stem(fname)
+    location = match.group("location").lower()
+    raw_tod = match.group("time").lower()
+    raw_weather = match.group("weather").lower()
+    tod = TIME_ALIASES.get(raw_tod)
+    weather = WEATHER_ALIASES.get(raw_weather)
+    if tod is None or weather is None:
+        return None
+    rest_parts = [
+        re.sub(r"[^a-z0-9]", "", part.lower())
+        for part in re.split(r"[_\s]+", match.group("rest").strip("_ "))
+    ]
+    is_synthetic = bool(match.group("synthetic")) or "ai" in {part for part in rest_parts if part}
+    return location, tod, weather, is_synthetic
+
+
+def next_processed_rel_path(tod: str, weather: str, location: str, is_synthetic: bool, used_paths: set[str]) -> str:
+    condition_dir = f"{tod}_{weather}"
+    location_dir = clean_stem(location)
+    base_stem = f"{clean_stem(location)}_{clean_stem(tod)}_{clean_stem(weather)}"
+
+    def candidate_name(index):
+        if is_synthetic:
+            return f"{base_stem}_{index}_ai.jpg"
+        if index is None:
+            return f"{base_stem}.jpg"
+        return f"{base_stem}_{index}.jpg"
+
+    indices = [None] if not is_synthetic else []
+    indices.extend(range(1, 10000))
+    for index in indices:
+        rel_path = os.path.join(location_dir, condition_dir, candidate_name(index)).lower()
+        if rel_path not in used_paths and not os.path.exists(os.path.join(cfg.processed_dir, rel_path)):
+            used_paths.add(rel_path)
+            return rel_path
+    raise RuntimeError(f"Could not allocate processed filename for {location}/{tod}/{weather}")
 
 
 def preprocess_complete() -> bool:
@@ -246,10 +316,19 @@ def preprocess_complete() -> bool:
         "location",
         "time_of_day",
         "weather",
+        "is_synthetic",
         "caption",
         "split",
     }
     if not required.issubset(df.columns) or df.empty:
+        return False
+    old_location_index_paths = [
+        p
+        for p, loc in zip(df["source_file"].astype(str), df["location"].astype(str), strict=False)
+        if Path(p).parts and Path(p).parts[0] != clean_stem(loc)
+    ]
+    if old_location_index_paths:
+        print("Processed manifest uses old location-index paths:", old_location_index_paths[:5])
         return False
     missing = [
         p for p in df["source_file"].astype(str) if not os.path.exists(os.path.join(cfg.processed_dir, p))
@@ -264,7 +343,7 @@ def run_preprocess() -> pd.DataFrame:
     assert os.path.isdir(cfg.raw_dir), f"Missing raw image directory: {cfg.raw_dir}"
     if cfg.redo_preprocess:
         print("redo_preprocess=True; deleting previous processed images and manifest.")
-        ensure_empty_dir(cfg.processed_dir)
+        replace_dir(cfg.processed_dir)
         if os.path.exists(cfg.manifest_csv):
             os.remove(cfg.manifest_csv)
     elif preprocess_complete():
@@ -289,15 +368,12 @@ def run_preprocess() -> pd.DataFrame:
             continue
         parsed_files.append((fname, *parsed))
 
-    location_to_index = {loc: idx for idx, loc in enumerate(sorted({row[1] for row in parsed_files}))}
     records = []
+    used_rel_paths = set()
 
-    for fname, location, tod, weather, stem in tqdm(parsed_files, desc="Preprocess images"):
+    for fname, location, tod, weather, is_synthetic in tqdm(parsed_files, desc="Preprocess images"):
         in_path = os.path.join(cfg.raw_dir, fname)
-        location_index = location_to_index[location]
-        condition_dir = f"{tod}_{weather}"
-        out_name = f"{stem}.jpg"
-        rel_path = os.path.join(str(location_index), condition_dir, out_name).lower()
+        rel_path = next_processed_rel_path(tod, weather, location, is_synthetic, used_rel_paths)
         out_path = os.path.join(cfg.processed_dir, rel_path)
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
@@ -314,11 +390,14 @@ def run_preprocess() -> pd.DataFrame:
                 "location": location,
                 "time_of_day": tod,
                 "weather": weather,
+                "is_synthetic": is_synthetic,
                 "caption": caption_from_labels(location, tod, weather),
                 "source_file": rel_path,
                 "original_file_name": fname.lower(),
+                "anchor_file": "",
                 "crop_w": "",
                 "crop_h": "",
+                "crop_area_ratio": "",
                 "matches": "",
                 "inliers": "",
                 "inlier_ratio": "",
@@ -349,6 +428,12 @@ def alignment_complete() -> bool:
     except Exception:
         return False
     if df.empty or "file_name" not in df.columns:
+        return False
+    if "status" not in df.columns:
+        return False
+    expected_statuses = {"aligned", "alignment_failed", "crop_dropped"}
+    statuses = set(df["status"].dropna().astype(str))
+    if not statuses or not statuses.issubset(expected_statuses):
         return False
     aligned_rows = df[df["file_name"].astype(str).str.startswith("aligned/")]
     if aligned_rows.empty:
@@ -464,7 +549,7 @@ def shared_crop_for_items(items: list[dict], anchor_area: int):
     return (x, y, crop_w, crop_h), (crop_w * crop_h) / max(1, anchor_area)
 
 
-def prune_to_valid_shared_crop(items: list[dict], anchor_area: int):
+def prune_to_valid_shared_crop(items: list[dict], anchor_area: int, anchor_source: str):
     dropped = []
     while True:
         crop, area_ratio = shared_crop_for_items(items, anchor_area)
@@ -482,13 +567,19 @@ def prune_to_valid_shared_crop(items: list[dict], anchor_area: int):
                 best_idx = idx
                 best_area = trial_area
         dropped_item = items.pop(best_idx)
+        drop_stats = {
+            **dropped_item["stats"],
+            "crop_area_ratio": round(float(area_ratio or 0), 4),
+            "best_without_drop_area_ratio": round(float(best_area or 0), 4),
+        }
         dropped.append(dropped_item)
         crop_drops.append(
             manifest_record_from_row(
                 dropped_item["row"],
                 "crop_dropped",
                 "excessive_crop_loss",
-                stats=dropped_item["stats"],
+                stats=drop_stats,
+                anchor_file=anchor_source,
             )
         )
         print(f"  [DROP] {dropped_item['row']['source_file']} caused excessive crop loss")
@@ -534,6 +625,7 @@ def align_location_group(location: str, group: pd.DataFrame) -> list[dict]:
                     "alignment_failed",
                     "missing_file",
                     stats={"matches": 0, "inliers": 0, "inlier_ratio": 0.0},
+                    anchor_file=anchor_source,
                 )
             )
             print(f"  [MISS] {target_source}")
@@ -541,7 +633,9 @@ def align_location_group(location: str, group: pd.DataFrame) -> list[dict]:
 
         H, stats = estimate_target_to_anchor(anchor_bgr, target_bgr, anchor_path, target_path)
         if H is None:
-            alignment_failures.append(manifest_record_from_row(row, "alignment_failed", stats["reason"], stats=stats))
+            alignment_failures.append(
+                manifest_record_from_row(row, "alignment_failed", stats["reason"], stats=stats, anchor_file=anchor_source)
+            )
             print(
                 f"  [FAIL] {target_source} matches={stats['matches']} "
                 f"inliers={stats['inliers']} ratio={stats['inlier_ratio']:.2f} "
@@ -563,7 +657,7 @@ def align_location_group(location: str, group: pd.DataFrame) -> list[dict]:
         )
         print(f"  [OK] {target_source} matches={stats['matches']} inliers={stats['inliers']} ratio={stats['inlier_ratio']:.2f}")
 
-    aligned_items, dropped, crop, area_ratio = prune_to_valid_shared_crop(aligned_items, anchor_area)
+    aligned_items, dropped, crop, area_ratio = prune_to_valid_shared_crop(aligned_items, anchor_area, anchor_source)
     if crop is None:
         print(f"  [SKIP] {location}: no shared crop after pruning")
         return []
@@ -589,6 +683,8 @@ def align_location_group(location: str, group: pd.DataFrame) -> list[dict]:
                 stats=item["stats"],
                 crop_w=crop_w,
                 crop_h=crop_h,
+                crop_area_ratio=round(float(area_ratio or 0), 4),
+                anchor_file=anchor_source,
             )
         )
 
@@ -602,7 +698,7 @@ def run_alignment(manifest_df: pd.DataFrame) -> pd.DataFrame:
     crop_drops = []
     if cfg.redo_alignment:
         print("redo_alignment=True; deleting previous aligned outputs.")
-        ensure_empty_dir(cfg.aligned_dir)
+        replace_dir(cfg.aligned_dir)
     elif alignment_complete():
         print("Alignment already complete; skipping.")
         return pd.read_csv(cfg.manifest_csv)
@@ -741,7 +837,7 @@ def choose_best_duplicate(rows: list[pd.Series]):
 def run_filtered(aligned_df: pd.DataFrame) -> pd.DataFrame:
     if cfg.redo_filtered:
         print("redo_filtered=True; deleting previous filtered outputs.")
-        ensure_empty_dir(cfg.filtered_dir)
+        replace_dir(cfg.filtered_dir)
     elif filtered_complete():
         print("Filtered dataset already complete; skipping.")
         return pd.read_csv(cfg.manifest_csv)
@@ -773,7 +869,7 @@ def run_filtered(aligned_df: pd.DataFrame) -> pd.DataFrame:
 
         location_dir = os.path.join(cfg.filtered_dir, clean_stem(location))
         os.makedirs(location_dir, exist_ok=True)
-        out_name = f"{clean_stem(location)}_{clean_stem(tod)}_{clean_stem(weather)}.jpg"
+        out_name = unique_output_name(location_dir, f"{clean_stem(location)}_{clean_stem(tod)}_{clean_stem(weather)}")
         out_path = os.path.join(location_dir, out_name)
         cv2.imwrite(out_path, img, [cv2.IMWRITE_JPEG_QUALITY, cfg.jpeg_quality])
         filtered_file = os.path.relpath(out_path, cfg.base)
@@ -820,7 +916,7 @@ def hf_dataset_complete() -> bool:
 def run_hf_export(final_manifest_df: pd.DataFrame) -> None:
     if cfg.redo_hf_dataset:
         print("redo_hf_dataset=True; deleting previous HF dataset export.")
-        ensure_empty_dir(cfg.hf_dataset_dir)
+        replace_dir(cfg.hf_dataset_dir)
     elif hf_dataset_complete():
         print("HF dataset already complete; skipping.")
         return
@@ -837,7 +933,7 @@ def run_hf_export(final_manifest_df: pd.DataFrame) -> None:
         if not os.path.exists(src_path):
             print(f"[MISS] HF source missing: {src_path}")
             continue
-        out_name = clean_stem(row["file_name"]) + ".jpg"
+        out_name = unique_output_name(images_dir, clean_stem(row["file_name"]))
         dst_rel = os.path.join("images", out_name)
         dst_path = os.path.join(cfg.hf_dataset_dir, dst_rel)
         shutil.copy2(src_path, dst_path)
@@ -848,6 +944,7 @@ def run_hf_export(final_manifest_df: pd.DataFrame) -> None:
                 "location": row["location"],
                 "time_of_day": row["time_of_day"],
                 "weather": row["weather"],
+                "is_synthetic": row.get("is_synthetic", ""),
                 "split": row["split"],
             }
         )
