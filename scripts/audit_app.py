@@ -5,7 +5,7 @@ Run locally:
     streamlit run scripts/audit_app_copy.py -- \
         --dataset_dir hf_dataset \
         --manifest_csv hf_dataset/metadata.csv \
-        --audit_csv hf_dataset/audit_decisions.csv
+        --output_csv hf_dataset/audit_decisions.csv
 
 This app lets you go through every image in a Hugging Face ImageFolder
 dataset by location, labeling each location/time_of_day/weather image as
@@ -60,7 +60,7 @@ def default_manifest_path(dataset_dir: str) -> str:
 
 
 MANIFEST_PATH = os.path.abspath(args.manifest_csv or default_manifest_path(DATASET_DIR))
-AUDIT_PATH = os.path.abspath(args.ouput_csv or os.path.join(DATASET_DIR, "audit_decisions.csv"))
+AUDIT_PATH = os.path.abspath(args.output_csv or os.path.join(DATASET_DIR, "audit_decisions.csv"))
 
 
 # ---------------------------------------------------------------------------

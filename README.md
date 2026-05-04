@@ -178,3 +178,14 @@ CIS_5190_group_project/checkpoints/
 ## Notes
 
 The old separate preprocessing/alignment notebooks and stale CSV-based scripts have been removed from the active workflow. Use `00_preprocess_and_align.ipynb` for Colab inspection or `scripts/preprocess.py` for cluster/local runs so teammates all use the same manifest-based pipeline.
+
+
+## Manual Auditing
+
+After pre-processing, you can (optionally) manually audit the hf_dataset output by running this line
+```sh
+streamlit run scripts/audit_app.py -- \
+        --dataset_dir hf_dataset \
+        --manifest_csv hf_dataset/metadata.csv \
+        --output_csv hf_dataset/audit_decisions.csv
+```
