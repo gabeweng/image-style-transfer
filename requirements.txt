@@ -13,6 +13,7 @@ peft>=0.9.0
 controlnet-aux>=0.0.7
 
 # Image processing
+git+https://github.com/cvg/LightGlue.git
 opencv-python-headless>=4.9.0
 pillow>=10.0.0
 pillow-heif>=0.15.0

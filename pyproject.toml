@@ -13,6 +13,7 @@ dependencies = [
     "accelerate>=0.27.0",
     "peft>=0.9.0",
     "controlnet-aux>=0.0.7",
+    "lightglue @ git+https://github.com/cvg/LightGlue.git",
     "opencv-python-headless>=4.9.0",
     "pillow>=10.0.0",
     "pillow-heif>=0.15.0",
@@ -24,7 +25,13 @@ dependencies = [
     "streamlit>=1.32.0",
     "ipykernel>=6.29.0",
     "jupyter>=1.0.0",
+    "matplotlib>=3.10.9",
 ]
 
 [tool.uv]
 package = false
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+]
