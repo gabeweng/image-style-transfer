@@ -193,5 +193,5 @@ After pre-processing, you can (optionally) manually audit the hf_dataset output 
 streamlit run scripts/audit_app.py -- \
         --dataset_dir hf_dataset \
         --manifest_csv hf_dataset/metadata.csv \
-        --output_csv hf_dataset/audit_decisions.csv
+        --output_csv audit_decisions.csv
 ```
