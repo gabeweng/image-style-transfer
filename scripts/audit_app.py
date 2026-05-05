@@ -30,9 +30,23 @@ AUDIT_COLUMNS = [
     "time_of_day",
     "weather",
     "decision",
+    "status",
+    "is_synthetic",
+    "split"
 ]
 
-REQUIRED_COLUMNS = {"file_name", "location", "time_of_day", "weather"}
+REQUIRED_COLUMNS = {"file_name", "location", "time_of_day", "weather", "status"}
+
+
+def ordered_output_columns(row_columns=None, existing_columns=None) -> list[str]:
+    columns = []
+    row_columns = [] if row_columns is None else list(row_columns)
+    existing_columns = [] if existing_columns is None else list(existing_columns)
+    for source in (AUDIT_COLUMNS, row_columns, existing_columns):
+        for col in source:
+            if col not in columns:
+                columns.append(col)
+    return columns
 
 
 # ---------------------------------------------------------------------------
@@ -69,10 +83,33 @@ AUDIT_PATH = os.path.abspath(args.output_csv or os.path.join(DATASET_DIR, "audit
 @st.cache_data
 def load_manifest(path: str) -> pd.DataFrame:
     suffix = Path(path).suffix.lower()
+    hf_metadata_path = os.path.join(DATASET_DIR, "metadata.csv")
+
     if suffix == ".jsonl":
         df = pd.read_json(path, lines=True)
     else:
         df = pd.read_csv(path)
+
+    # Process only kept images
+    if ("status" in df.columns):
+        df = df[df["status"].str.lower().eq("kept")]
+
+    # Merge manifest.csv with metadata.csv and use that as our manifest data
+    if (os.path.exists(hf_metadata_path)):
+        meta_df = pd.read_csv(hf_metadata_path)
+        meta_df = meta_df.drop(columns=["text"])
+
+        meta_df["fname"] = meta_df["file_name"].apply(lambda x: Path(x).name)
+
+        # HACK: manually added _aligned.jpg to end of file name (without file type)
+        df["fname"] = df["file_name"].apply(lambda x: Path(x).stem) + "_aligned.jpg"
+
+        # Drop this file_name column, it's kinda inconsistent, prefer the metadata.csv file names
+        df = df.drop(columns=["file_name"])
+        # Merge to get the columns of manifest.csv with consistent file names of metadata.csv
+        df = df.merge(meta_df, on=["fname","location","time_of_day","weather","is_synthetic","split"], how="inner")
+        # print(df)
+        df = df.drop(columns=["fname"])
 
     missing = REQUIRED_COLUMNS - set(df.columns)
     if missing:
@@ -82,10 +119,6 @@ def load_manifest(path: str) -> pd.DataFrame:
     for col in REQUIRED_COLUMNS:
         df[col] = df[col].fillna("").astype(str)
 
-    if "status" in df.columns:
-        kept = df[df["status"].fillna("").astype(str).str.lower().eq("kept")]
-        if not kept.empty:
-            df = kept
 
     return df.sort_values(["location", "time_of_day", "weather", "file_name"]).reset_index(drop=True)
 
@@ -99,7 +132,7 @@ def load_audit(path: str) -> pd.DataFrame:
     for col in AUDIT_COLUMNS:
         if col not in df.columns:
             df[col] = ""
-    return df[AUDIT_COLUMNS]
+    return df[ordered_output_columns(existing_columns=df.columns)]
 
 
 def image_path(row: pd.Series) -> str:
@@ -133,16 +166,17 @@ def current_decision(audit_df: pd.DataFrame, row: pd.Series) -> str:
 
 def save_decision(audit_df: pd.DataFrame, row: pd.Series, decision: str, path: str) -> None:
     key = image_key(row)
-    record = {
-        "file_name": key,
-        "location": row["location"],
-        "time_of_day": row["time_of_day"],
-        "weather": row["weather"],
-        "decision": decision,
-    }
+    record = row.to_dict()
+    record["file_name"] = key
+    record["decision"] = decision
+    record["status"] = "kept" if decision != "rejected" else "human_rejected"
 
     kept = audit_df[~audit_df["file_name"].astype(str).eq(key)].copy()
     out = pd.concat([kept, pd.DataFrame([record])], ignore_index=True)
+    for col in ordered_output_columns(row.index, out.columns):
+        if col not in out.columns:
+            out[col] = ""
+    out = out[ordered_output_columns(row.index, out.columns)]
     out = out.sort_values(["location", "time_of_day", "weather", "file_name"])
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     out.to_csv(path, index=False)
