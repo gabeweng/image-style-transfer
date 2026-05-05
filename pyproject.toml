@@ -26,6 +26,7 @@ dependencies = [
     "ipykernel>=6.29.0",
     "jupyter>=1.0.0",
     "matplotlib>=3.10.9",
+    "seaborn>=0.13.2",
 ]
 
 [tool.uv]
