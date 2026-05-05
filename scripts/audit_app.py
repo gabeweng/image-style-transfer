@@ -41,7 +41,7 @@ REQUIRED_COLUMNS = {"file_name", "location", "time_of_day", "weather"}
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument("--dataset_dir", default="hf_dataset")
 parser.add_argument("--manifest_csv", default=None)
-parser.add_argument("--ouput_csv", default=None)
+parser.add_argument("--output_csv", default=None)
 args, _ = parser.parse_known_args()
 
 DATASET_DIR = os.path.abspath(args.dataset_dir)

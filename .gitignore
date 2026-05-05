@@ -46,3 +46,5 @@ hf_dataset/
 aligned/
 filtered_aligned/
 processedImages/
+Images/
+manifest.csv
