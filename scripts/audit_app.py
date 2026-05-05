@@ -5,7 +5,7 @@ Run locally:
     streamlit run scripts/audit_app_copy.py -- \
         --dataset_dir hf_dataset \
         --manifest_csv hf_dataset/metadata.csv \
-        --output_csv hf_dataset/audit_decisions.csv
+        --output_csv audit_decisions.csv
 
 This app lets you go through every image in a Hugging Face ImageFolder
 dataset by location, labeling each location/time_of_day/weather image as
