@@ -311,8 +311,7 @@ if img is None:
 else:
     _, col2, _ = st.columns([1, 2, 1])
     with col2:
-        st.image(img, use_container_width=True)
-    # st.image(img, width="content")
+        st.image(img, width="stretch")
 
 nav_l, nav_m, nav_r = st.columns([1, 2, 1])
 with nav_l:
