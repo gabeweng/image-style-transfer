@@ -40,6 +40,85 @@ The Colab notebooks install their own runtime dependencies.
 
 The active preprocessing pipeline expects the project data to live in Google Drive:
 
+The Colab notebooks install their own runtime dependencies with `uv pip install --system`
+before mounting Google Drive.
+
+### Windows laptop (Docker Desktop + GPU)
+
+Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/) with the WSL2 backend enabled and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed inside WSL2.
+
+One-time WSL2 setup:
+```bash
+# Run inside WSL2 (wsl in PowerShell)
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+```
+Then restart Docker Desktop. Verify with: `docker run --gpus all --rm nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi`
+
+```powershell
+# Build (run once, or after changing requirements.txt)
+docker build -t image-style-transfer .
+
+# Interactive shell with data mounted
+docker run --gpus all -it `
+  -v "C:\path\to\your\data:/workspace/data" `
+  image-style-transfer
+
+# Run alignment script
+docker run --gpus all -it `
+  -v "C:\path\to\your\data:/workspace/data" `
+  image-style-transfer `
+  python scripts/align_images.py `
+    --images_dir /workspace/data/processed `
+    --labels_csv /workspace/data/img_labels.csv `
+    --output_dir /workspace/data/aligned `
+    --output_csv /workspace/data/aligned_labels.csv
+
+# Streamlit audit app — opens at http://localhost:8501
+docker run --gpus all -it -p 8501:8501 `
+  -v "C:\path\to\your\data:/workspace/data" `
+  image-style-transfer `
+  streamlit run scripts/audit_app.py --server.address 0.0.0.0 -- `
+    --aligned_csv /workspace/data/aligned_labels.csv `
+    --aligned_dir /workspace/data/aligned `
+    --eval_csv    /workspace/data/lpips_eval_set.csv
+
+# Classifier training (ResNet-18 fits easily in 4GB)
+docker run --gpus all -it `
+  -v "C:\path\to\your\data:/workspace/data" `
+  -v "C:\path\to\your\checkpoints:/workspace/checkpoints" `
+  image-style-transfer `
+  python scripts/train_classifier.py `
+    --images_dir /workspace/data/aligned `
+    --labels_csv /workspace/data/aligned_labels.csv `
+    --output_dir /workspace/checkpoints
+```
+
+> **Note:** The backtick `` ` `` is the PowerShell line-continuation character. If using Command Prompt, replace each `` ` `` with `^`.
+>
+> **VRAM note (RTX 3050, 4GB):** Inference notebooks (SD baseline, InstructPix2Pix, ControlNet) all use `enable_model_cpu_offload()` and fit in 4GB. LoRA training requires EC2 — `batch_size=4` will OOM on 4GB.
+
+### EC2 (Docker — full training)
+
+```bash
+# Build image
+docker build -t image-style-transfer .
+
+# Run with volume-mapped workspace
+docker run --gpus all -it \
+  -v /home/ubuntu/project:/workspace \
+  image-style-transfer
+```
+
+---
+
+## Data
+
+All raw images (`*.HEIC`, `*.JPG`) and CSV files live on Google Drive:
 ```
 CIS_5190_group_project/
 ├── Images/              raw uploaded photos
