@@ -8,7 +8,7 @@ Transform UPenn campus images across time-of-day and weather conditions while pr
 image-style-transfer/
 ├── notebooks/
 │   ├── 00_preprocess_and_align.ipynb  # main data-prep notebook
-│   ├── 01_pipeline_colab.ipynb        # optional post-dataset training runner
+│   ├── 01_trainingipynb        # optional post-dataset training runner
 │   ├── 02_inference.ipynb             # inference experiments
 │   └── 03_evaluate.ipynb              # evaluation experiments
 ├── scripts/
@@ -246,7 +246,7 @@ Only rows with `status == "kept"` are exported.
 
 ## Optional Training
 
-After preprocessing finishes, [notebooks/01_pipeline_colab.ipynb](notebooks/01_pipeline_colab.ipynb) can validate the manifest/HF dataset and run optional LoRA or ControlNet training from Colab.
+After preprocessing finishes, [notebooks/01_trainingipynb](notebooks/01_training.ipynb) can validate the manifest/HF dataset and run optional LoRA or ControlNet training from Colab.
 
 For LoRA training, the relevant dataset path is:
 
