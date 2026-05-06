@@ -272,5 +272,17 @@ After pre-processing, you can (optionally) manually audit the hf_dataset output 
 streamlit run scripts/audit_app.py -- \
         --dataset_dir hf_dataset \
         --manifest_csv hf_dataset/metadata.csv \
-        --output_csv hf_dataset/audit_decisions.csv
+        --output_csv audit_decisions.csv
+```
+
+
+## Run the Inference/Evaluate Steps
+We used Vscode to execute the inference/evaluate notebooks on the EC2 instances/locally, but to run it without Vscode,
+you can install `papermill` to run the notebooks locally and get the output files.
+
+```
+uv add papermill
+cd notebooks/
+papermill 02_inference.ipynb out1.ipynb --log-output
+papermill 03_evaluate.ipynb out2.ipynb --log-output
 ```

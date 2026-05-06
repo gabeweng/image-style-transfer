@@ -48,3 +48,6 @@ filtered_aligned/
 processedImages/
 Images/
 manifest.csv
+audit_decisions.csv
+diffusers/
+out.ipynb
