@@ -1,39 +1,44 @@
 # Image Style Transfer — CIS 4190/5190
 
-Transform UPenn campus images across time-of-day (daytime / sunset / night) and weather (sunny / cloudy / rainy) conditions while preserving scene geometry.
+Transform UPenn campus images across time-of-day and weather conditions while preserving scene geometry.
 
-## Repository layout
+## Repository Layout
 
 ```
 image-style-transfer/
 ├── notebooks/
-│   ├── 01_preprocessing.ipynb      # HEIC→JPEG, build img_labels.csv
-│   ├── 02_inference.ipynb          # all four models: SD baseline, IP2P, ControlNet, ControlNet+LoRA
-│   └── 03_evaluate.ipynb           # LPIPS + Condition Accuracy comparison table
+│   ├── 00_preprocess_and_align.ipynb  # main data-prep notebook
+│   ├── 01_pipeline_colab.ipynb        # optional post-dataset training runner
+│   ├── 02_inference.ipynb             # inference experiments
+│   └── 03_evaluate.ipynb              # evaluation experiments
 ├── scripts/
-│   ├── align_images.py             # standalone alignment (run on EC2)
-│   ├── audit_app.py                # Streamlit pair-curation UI
-│   ├── prepare_hf_dataset.py       # convert aligned CSV → HF ImageFolder format
-│   └── train_classifier.py         # ResNet-18 condition classifier (run on EC2)
+│   ├── preprocess.py                # full cluster/local data-prep CLI
+│   ├── audit_app.py
+│   └── train_classifier.py
 ├── Dockerfile
+├── pyproject.toml
 └── requirements.txt
 ```
 
----
-
 ## Setup
 
-### Local / Colab
+Local setup:
 
 ```bash
 uv sync
 ```
 
-or, without uv:
+Without `uv`:
 
 ```bash
 pip install -r requirements.txt
 ```
+
+The Colab notebooks install their own runtime dependencies.
+
+## Data Layout
+
+The active preprocessing pipeline expects the project data to live in Google Drive:
 
 The Colab notebooks install their own runtime dependencies with `uv pip install --system`
 before mounting Google Drive.
@@ -116,157 +121,156 @@ docker run --gpus all -it \
 All raw images (`*.HEIC`, `*.JPG`) and CSV files live on Google Drive:
 ```
 CIS_5190_group_project/
-├── Images/              raw photos
-├── processedImages/     center-cropped outputs from notebook 01
-├── aligned/             homography-aligned outputs from align_images.py
-├── img_labels.csv
-├── aligned_labels.csv
-└── lpips_eval_set.csv
+├── Images/              raw uploaded photos
+├── processedImages/     orientation-corrected JPEGs
+├── aligned/             intermediate aligned images
+├── filtered_aligned/    final one-per-condition aligned images
+├── hf_dataset/          Hugging Face ImageFolder export
+├── checkpoints/
+├── outputs/
+└── manifest.csv
 ```
 
-### Filename convention
-```
-LOCATION_TOD_WEATHER_N.EXT
-```
-- `LOCATION` — e.g. `LOCUSTWALK`, `GREGORY`, `HARRISON`
-- `TOD` — `daytime` | `sunset` | `night`
-- `WEATHER` — `sunny` | `cloudy` | `rainy` | `clear`
-- `N` — integer index
+Raw filenames should follow:
 
-### HuggingFace dataset format (required for fine-tuning)
+```
+LOCATION_TIME_WEATHER[_N].EXT
+```
 
-Run this once after alignment to produce the training dataset:
+Examples:
+
+```
+agh3rd_day_cloudy.jpg
+arch_night_clear_2.HEIC
+vp_sunset_cloudy.JPG
+castle_night_clear_ai.png
+```
+
+The optional trailing `_ai` marks synthetic images and is recorded in `manifest.csv` as `is_synthetic=True`. The preprocessing pipeline parses `location`, `time_of_day`, and `weather` from the filename, generates stable captions, and records every uploaded image in `manifest.csv`.
+
+## Main Preprocessing Workflow
+
+Run [notebooks/00_preprocess_and_align.ipynb](notebooks/00_preprocess_and_align.ipynb) in Colab for visual debugging, or run the equivalent cluster/local CLI:
 
 ```bash
-# Standard (LoRA / SD img2img)
-python scripts/prepare_hf_dataset.py \
-    --aligned_csv  /path/to/aligned_labels.csv \
-    --aligned_dir  /path/to/aligned \
-    --output_dir   /path/to/data/hf_dataset
-
-# ControlNet variant (also generates Canny conditioning_images/)
-python scripts/prepare_hf_dataset.py \
-    --aligned_csv  /path/to/aligned_labels.csv \
-    --aligned_dir  /path/to/aligned \
-    --output_dir   /path/to/data/hf_dataset_controlnet \
-    --controlnet
+python scripts/preprocess.py \
+  --base /path/to/CIS_5190_group_project \
+  --redo-all
 ```
 
-Output layout:
+Both paths produce the same core outputs: `processedImages/`, `aligned/`, `filtered_aligned/`, `manifest.csv`, and `hf_dataset/`.
+
+The preprocessing pipeline performs the full sequence:
+
+1. Converts raw uploads into standardized JPEGs under `processedImages/<location>/<time>_<weather>/`.
+2. Builds and updates `manifest.csv`.
+3. Aligns each location group with feature matching and homography.
+4. Crops black or invalid warp areas using a uniform group crop.
+5. Drops images when the shared crop would lose too much image area.
+6. Filters duplicate images so each `location + time_of_day + weather` condition keeps one representative.
+7. Writes final images under `filtered_aligned/`.
+8. Exports `hf_dataset/images/` and `hf_dataset/metadata.jsonl` for diffusion fine-tuning.
+
+The main notebook control flags are in the configuration cell:
+
+```python
+REDO_PREPROCESS = True
+REDO_ALIGNMENT = True
+REDO_FILTERED = True
+REDO_HF_DATASET = True
+OUTPUT_SIZE = 512
+MIN_SHARED_CROP_AREA_RATIO = 0.50
+```
+
+When a `REDO_*` flag is `True`, the corresponding output folder is replaced. When it is `False`, the notebook checks whether the expected files already exist and skips completed work; rerun stages create missing directories and use unique output names instead of deleting existing image folders.
+
+The script exposes equivalent flags:
+
+```bash
+python scripts/preprocess.py --base /path/to/project --redo-preprocess
+python scripts/preprocess.py --base /path/to/project --redo-alignment
+python scripts/preprocess.py --base /path/to/project --redo-filtered
+python scripts/preprocess.py --base /path/to/project --redo-hf-dataset
+```
+
+## Manifest
+
+`manifest.csv` is the source of truth for preprocessing outcomes. It contains all uploaded images, including failed or dropped rows.
+
+Important columns:
+
+```
+file_name
+location
+time_of_day
+weather
+is_synthetic
+caption
+source_file
+original_file_name
+anchor_file
+crop_w
+crop_h
+crop_area_ratio
+matches
+inliers
+inlier_ratio
+representative_score
+split
+status
+drop_reason
+```
+
+Use `status == "kept"` for the final training images. Other statuses explain what happened to non-final images, such as `alignment_failed`, `crop_dropped`, or `duplicate_filtered`.
+
+For alignment and crop auditing, `anchor_file` records the processed image used as the location-group anchor, and `crop_area_ratio` records the retained shared crop area relative to that anchor. These fields make it easier to review `crop_dropped` and `alignment_failed` rows later.
+
+## Hugging Face Dataset
+
+The final diffusion dataset is exported by `00_preprocess_and_align.ipynb` or `scripts/preprocess.py`:
+
 ```
 hf_dataset/
-├── metadata.jsonl          {"file_name": "images/foo.jpg", "text": "A photo of..."}
+├── metadata.jsonl
 └── images/
     └── *.jpg
-
-hf_dataset_controlnet/
-├── metadata.jsonl
-├── images/
-└── conditioning_images/    Canny edge maps (same filenames as images/)
 ```
 
----
+`metadata.jsonl` uses the standard ImageFolder format:
 
-## Data pipeline
-
-### 1. Preprocess
-Run `notebooks/01_preprocessing.ipynb` on Colab (mounts Drive, reads `Images/`, writes `processedImages/` and `img_labels.csv`).
-The generated `img_labels.csv` uses `file_name` for the processed JPEG filename consumed by alignment and preserves the raw upload name in `original_file_name`.
-
-### 2. Align
-```bash
-# EC2 or Colab
-python scripts/align_images.py \
-    --images_dir /path/to/processedImages \
-    --labels_csv /path/to/img_labels.csv \
-    --output_dir /path/to/aligned \
-    --output_csv /path/to/aligned_labels.csv \
-    --size 512
+```json
+{"file_name": "images/agh3rd_day_cloudy.jpg", "text": "A photo of Agh3rd on the University of Pennsylvania campus at day, cloudy weather"}
 ```
 
-### 3. Audit
-```bash
-# Local only — opens a browser at http://localhost:8501
+Only rows with `status == "kept"` are exported.
+
+## Optional Training
+
+After preprocessing finishes, [notebooks/01_pipeline_colab.ipynb](notebooks/01_pipeline_colab.ipynb) can validate the manifest/HF dataset and run optional LoRA or ControlNet training from Colab.
+
+For LoRA training, the relevant dataset path is:
+
+```
+CIS_5190_group_project/hf_dataset
+```
+
+The notebook writes training checkpoints under:
+
+```
+CIS_5190_group_project/checkpoints/
+```
+
+## Notes
+
+The old separate preprocessing/alignment notebooks and stale CSV-based scripts have been removed from the active workflow. Use `00_preprocess_and_align.ipynb` for Colab inspection or `scripts/preprocess.py` for cluster/local runs so teammates all use the same manifest-based pipeline.
+
+
+## Manual Auditing
+
+After pre-processing, you can (optionally) manually audit the hf_dataset output by running this line
+```sh
 streamlit run scripts/audit_app.py -- \
-    --aligned_csv /path/to/aligned_labels.csv \
-    --aligned_dir /path/to/aligned \
-    --eval_csv    /path/to/lpips_eval_set.csv
-```
-Approve pairs to populate `lpips_eval_set.csv` (the strict LPIPS evaluation set).
-
----
-
-## Fine-tuning (EC2 — run inside tmux)
-
-### Train condition classifier
-```bash
-python scripts/train_classifier.py \
-    --images_dir /workspace/data/aligned \
-    --labels_csv /workspace/data/aligned_labels.csv \
-    --output_dir /workspace/checkpoints \
-    --epochs 20 \
-    --batch_size 32
-```
-Saves `checkpoints/classifier_best.pt`.
-
-### LoRA fine-tuning on Penn campus images
-```bash
-accelerate launch \
-  diffusers_examples/text_to_image/train_text_to_image_lora.py \
-  --pretrained_model_name_or_path="stable-diffusion-v1-5/stable-diffusion-v1-5" \
-  --train_data_dir="/workspace/data/hf_dataset" \
-  --output_dir="/workspace/checkpoints/lora" \
-  --resolution=512 \
-  --train_batch_size=4 \
-  --num_train_epochs=10 \
-  --learning_rate=1e-4 \
-  --lr_scheduler="cosine" \
-  --mixed_precision="fp16" \
-  --gradient_checkpointing \
-  --checkpointing_steps=500 \
-  --caption_column="text"
-```
-
-### ControlNet fine-tuning
-```bash
-accelerate launch \
-  diffusers_examples/controlnet/train_controlnet.py \
-  --pretrained_model_name_or_path="stable-diffusion-v1-5/stable-diffusion-v1-5" \
-  --output_dir="/workspace/checkpoints/controlnet" \
-  --train_data_dir="/workspace/data/hf_dataset_controlnet" \
-  --resolution=512 \
-  --train_batch_size=2 \
-  --num_train_epochs=5 \
-  --mixed_precision="fp16" \
-  --gradient_checkpointing \
-  --conditioning_image_column="conditioning_images" \
-  --image_column="images" \
-  --caption_column="text"
-```
-
----
-
-## Inference + Evaluation
-
-Run `notebooks/02_inference.ipynb` — toggle `RUN_*` flags at the top to choose which models to run. All four models run sequentially with GPU memory cleared between each. Set `LORA_DIR = None` or `RUN_CONTROLNET_LORA = False` to skip model D before LoRA training is done.
-
-Then run `notebooks/03_evaluate.ipynb` to compute LPIPS and Condition Accuracy across all models.
-
-| Metric | Description |
-|--------|-------------|
-| **LPIPS ↓** | Perceptual similarity to ground-truth (AlexNet, `lpips` library) |
-| **Condition Accuracy ↑** | % of generated images classified as target condition by `classifier_best.pt` |
-
----
-
-## Reproducibility
-
-```bash
-# Full pipeline (EC2)
-python scripts/align_images.py        [args]
-python scripts/prepare_hf_dataset.py  [args]
-python scripts/train_classifier.py    [args]
-# kick off LoRA / ControlNet training (see Fine-tuning section)
-# run notebooks/02_inference.ipynb
-# run notebooks/03_evaluate.ipynb
+        --dataset_dir hf_dataset \
+        --manifest_csv hf_dataset/metadata.csv \
+        --output_csv hf_dataset/audit_decisions.csv
 ```

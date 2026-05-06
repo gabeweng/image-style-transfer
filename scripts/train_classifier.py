@@ -9,8 +9,8 @@ Combined loss: L = L_tod + L_weather
 
 Usage (EC2 / Colab):
     python scripts/train_classifier.py \
-        --images_dir   /path/to/aligned \
-        --labels_csv   /path/to/aligned_labels.csv \
+        --images_dir   /path/to/CIS_5190_group_project \
+        --labels_csv   /path/to/manifest.csv \
         --output_dir   checkpoints/ \
         --epochs       20 \
         --batch_size   32
@@ -28,6 +28,7 @@ from PIL import Image
 from pillow_heif import register_heif_opener
 from torch.utils.data import DataLoader, Dataset, random_split
 from torchvision import models, transforms
+from tqdm.auto import tqdm
 
 register_heif_opener()
 
@@ -42,6 +43,28 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 # Dataset
 # ---------------------------------------------------------------------------
 
+def load_label_frame(labels_csv: str) -> pd.DataFrame:
+    df = pd.read_csv(labels_csv)
+
+    if {"status", "file_name", "time_of_day", "weather"}.issubset(df.columns):
+        df = df[df["status"] == "kept"].copy()
+        df["image_file"] = df["file_name"]
+        return df
+
+    # Backward-compatible fallback for older pair CSVs.
+    if {"warped_path", "target_tod", "target_weather"}.issubset(df.columns):
+        df = df.copy()
+        df["image_file"] = df["warped_path"]
+        df["time_of_day"] = df["target_tod"]
+        df["weather"] = df["target_weather"]
+        return df
+
+    raise ValueError(
+        "Unsupported labels CSV. Expected manifest.csv with status/file_name/time_of_day/weather "
+        "or an older pair CSV with warped_path/target_tod/target_weather."
+    )
+
+
 class ConditionDataset(Dataset):
     def __init__(self, df: pd.DataFrame, images_dir: str, transform):
         self.df = df.reset_index(drop=True)
@@ -53,12 +76,12 @@ class ConditionDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        path = os.path.join(self.images_dir, row["warped_path"])
+        path = os.path.join(self.images_dir, row["image_file"])
         img = Image.open(path).convert("RGB")
         img = self.transform(img)
 
-        tod_label = TOD_CLASSES.index(row["target_tod"].lower())
-        wx_label = WX_CLASSES.index(row["target_weather"].lower())
+        tod_label = TOD_CLASSES.index(row["time_of_day"].lower())
+        wx_label = WX_CLASSES.index(row["weather"].lower())
         return img, tod_label, wx_label
 
 
@@ -85,18 +108,21 @@ class DualHeadResNet(nn.Module):
 # Training loop
 # ---------------------------------------------------------------------------
 
-def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split):
+def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split, resume):
     os.makedirs(output_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    df = pd.read_csv(labels_csv)
-    df["target_tod"] = df["target_tod"].str.lower().str.strip()
-    df["target_weather"] = df["target_weather"].str.lower().str.strip()
+    df = load_label_frame(labels_csv)
+    df["time_of_day"] = df["time_of_day"].str.lower().str.strip()
+    df["weather"] = df["weather"].str.lower().str.strip()
 
     # Drop rows whose label isn't in our class lists
-    df = df[df["target_tod"].isin(TOD_CLASSES) & df["target_weather"].isin(WX_CLASSES)]
+    df = df[df["time_of_day"].isin(TOD_CLASSES) & df["weather"].isin(WX_CLASSES)]
+    df = df[df["image_file"].apply(lambda p: os.path.exists(os.path.join(images_dir, p)))]
     print(f"Dataset size after filtering: {len(df)}")
+    if df.empty:
+        raise ValueError("No classifier training rows found. Check --images_dir and --labels_csv.")
 
     train_tf = transforms.Compose([
         transforms.RandomHorizontalFlip(),
@@ -113,12 +139,14 @@ def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split)
         transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
     ])
 
-    full_ds = ConditionDataset(df, images_dir, train_tf)
-    val_size = max(1, int(len(full_ds) * val_split))
-    train_size = len(full_ds) - val_size
-    train_ds, val_ds = random_split(full_ds, [train_size, val_size])
-    val_ds.dataset = ConditionDataset(df.iloc[val_ds.indices].reset_index(drop=True),
-                                      images_dir, val_tf)
+    val_size = max(1, int(len(df) * val_split))
+    train_size = len(df) - val_size
+    generator = torch.Generator().manual_seed(42)
+    train_subset, val_subset = random_split(df.reset_index(drop=True), [train_size, val_size], generator=generator)
+    train_df = df.iloc[train_subset.indices].reset_index(drop=True)
+    val_df = df.iloc[val_subset.indices].reset_index(drop=True)
+    train_ds = ConditionDataset(train_df, images_dir, train_tf)
+    val_ds = ConditionDataset(val_df, images_dir, val_tf)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
@@ -129,12 +157,24 @@ def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     best_val_acc = 0.0
+    start_epoch = 1
 
-    for epoch in range(1, epochs + 1):
+    last_ckpt_path = os.path.join(output_dir, "classifier_last.pt")
+    if resume and os.path.exists(last_ckpt_path):
+        ckpt = torch.load(last_ckpt_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        best_val_acc = ckpt.get("best_val_acc", 0.0)
+        start_epoch = ckpt["epoch"] + 1
+        print(f"Resuming from {last_ckpt_path} at epoch {start_epoch}")
+
+    for epoch in range(start_epoch, epochs + 1):
         # --- Train ---
         model.train()
         total_loss = 0.0
-        for imgs, tod_labels, wx_labels in train_loader:
+        progress = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
+        for imgs, tod_labels, wx_labels in progress:
             imgs = imgs.to(device)
             tod_labels = tod_labels.to(device)
             wx_labels = wx_labels.to(device)
@@ -146,6 +186,7 @@ def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split)
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
+            progress.set_postfix(loss=f"{loss.item():.4f}")
 
         scheduler.step()
 
@@ -172,8 +213,24 @@ def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split)
             f"val tod={tod_acc:.3f} wx={wx_acc:.3f} avg={avg_acc:.3f}"
         )
 
-        if avg_acc > best_val_acc:
+        is_best = avg_acc > best_val_acc
+        if is_best:
             best_val_acc = avg_acc
+
+        torch.save({
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "tod_classes": TOD_CLASSES,
+            "wx_classes": WX_CLASSES,
+            "val_tod_acc": tod_acc,
+            "val_wx_acc": wx_acc,
+            "best_val_acc": best_val_acc,
+        }, last_ckpt_path)
+        print(f"  Saved latest checkpoint: {last_ckpt_path}")
+
+        if is_best:
             ckpt_path = os.path.join(output_dir, "classifier_best.pt")
             torch.save({
                 "epoch": epoch,
@@ -182,6 +239,7 @@ def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split)
                 "wx_classes": WX_CLASSES,
                 "val_tod_acc": tod_acc,
                 "val_wx_acc": wx_acc,
+                "best_val_acc": best_val_acc,
             }, ckpt_path)
             print(f"  ↳ Saved best checkpoint (avg_acc={avg_acc:.3f})")
 
@@ -191,13 +249,14 @@ def train(images_dir, labels_csv, output_dir, epochs, batch_size, lr, val_split)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--images_dir", required=True, help="Folder with aligned images")
-    parser.add_argument("--labels_csv", required=True, help="aligned_labels.csv (or img_labels.csv)")
+    parser.add_argument("--images_dir", required=True, help="Dataset base folder. For manifest.csv, pass the project base directory.")
+    parser.add_argument("--labels_csv", required=True, help="manifest.csv from scripts/preprocess.py or the notebook")
     parser.add_argument("--output_dir", default="checkpoints", help="Where to save checkpoints")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--val_split", type=float, default=0.2)
+    parser.add_argument("--resume", action="store_true", help="Resume from classifier_last.pt if present")
     args = parser.parse_args()
 
     train(
@@ -208,4 +267,5 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         lr=args.lr,
         val_split=args.val_split,
+        resume=args.resume,
     )

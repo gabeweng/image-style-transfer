@@ -33,7 +33,18 @@ env/
 
 # Jupyter
 .ipynb_checkpoints/
+*.Zone.Identifier
 
 # OS
 .DS_Store
 Thumbs.db
+
+
+# Some WIPs and Data Files
+README_OLD.md
+hf_dataset/
+aligned/
+filtered_aligned/
+processedImages/
+Images/
+manifest.csv
