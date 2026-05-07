@@ -8,13 +8,14 @@ Transform UPenn campus images across time-of-day and weather conditions while pr
 image-style-transfer/
 ├── notebooks/
 │   ├── 00_preprocess_and_align.ipynb  # main data-prep notebook
-│   ├── 01_trainingipynb        # optional post-dataset training runner
+│   ├── 01_training.ipynb               # train LoRA weights
 │   ├── 02_inference.ipynb             # inference experiments
-│   └── 03_evaluate.ipynb              # evaluation experiments
+│   ├── 03_evaluate.ipynb              # evaluation experiments
+│   └── 04_single_image.ipynb           # runs models on single image
 ├── scripts/
-│   ├── preprocess.py                # full cluster/local data-prep CLI
-│   ├── audit_app.py
-│   └── train_classifier.py
+│   ├── preprocess.py                # script version of 00_preprocess...
+│   ├── audit_app.py                 # human audit preprocessed steps
+│   └── train_classifier.py          # train img->condition classifier
 ├── Dockerfile
 ├── pyproject.toml
 └── requirements.txt
@@ -22,28 +23,25 @@ image-style-transfer/
 
 ## Setup
 
-Local setup:
+This assumes we have access to `image-style-transfer`.
+
+### Local setup (MacOS/Linux):
 
 ```bash
+cd image-style-transfer
 uv sync
-```
-
-Without `uv`:
-
-```bash
+# Without uv, run the line below
 pip install -r requirements.txt
 ```
 
-The Colab notebooks install their own runtime dependencies.
+### Colab Setup
+The Colab notebooks install their own runtime dependencies. Note that the active preprocessing pipeline expects the project. It does expect that within `MyDrive` folder of Google Drive, we have a folder called `CIS_5190_group_project/Images` that has all the images within our training set.
 
-## Data Layout
+The Colab notebooks install their own runtime dependencies with `uv pip install --system` before mounting Google Drive, so all you'd need to do is run the Colab. If you're on Colab, run the notebooks in numerical order and it should work. Ignore all other running instructions below. 
 
-The active preprocessing pipeline expects the project data to live in Google Drive:
+**Note**: The full pipeline hasn't been tested on Colab.
 
-The Colab notebooks install their own runtime dependencies with `uv pip install --system`
-before mounting Google Drive.
-
-### Windows laptop (Docker Desktop + GPU)
+### Windows (Docker Desktop + GPU)
 
 Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/) with the WSL2 backend enabled and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed inside WSL2.
 
@@ -67,40 +65,7 @@ docker build -t image-style-transfer .
 docker run --gpus all -it `
   -v "C:\path\to\your\data:/workspace/data" `
   image-style-transfer
-
-# Run alignment script
-docker run --gpus all -it `
-  -v "C:\path\to\your\data:/workspace/data" `
-  image-style-transfer `
-  python scripts/align_images.py `
-    --images_dir /workspace/data/processed `
-    --labels_csv /workspace/data/img_labels.csv `
-    --output_dir /workspace/data/aligned `
-    --output_csv /workspace/data/aligned_labels.csv
-
-# Streamlit audit app — opens at http://localhost:8501
-docker run --gpus all -it -p 8501:8501 `
-  -v "C:\path\to\your\data:/workspace/data" `
-  image-style-transfer `
-  streamlit run scripts/audit_app.py --server.address 0.0.0.0 -- `
-    --aligned_csv /workspace/data/aligned_labels.csv `
-    --aligned_dir /workspace/data/aligned `
-    --eval_csv    /workspace/data/lpips_eval_set.csv
-
-# Classifier training (ResNet-18 fits easily in 4GB)
-docker run --gpus all -it `
-  -v "C:\path\to\your\data:/workspace/data" `
-  -v "C:\path\to\your\checkpoints:/workspace/checkpoints" `
-  image-style-transfer `
-  python scripts/train_classifier.py `
-    --images_dir /workspace/data/aligned `
-    --labels_csv /workspace/data/aligned_labels.csv `
-    --output_dir /workspace/checkpoints
 ```
-
-> **Note:** The backtick `` ` `` is the PowerShell line-continuation character. If using Command Prompt, replace each `` ` `` with `^`.
->
-> **VRAM note (RTX 3050, 4GB):** Inference notebooks (SD baseline, InstructPix2Pix, ControlNet) all use `enable_model_cpu_offload()` and fit in 4GB. LoRA training requires EC2 — `batch_size=4` will OOM on 4GB.
 
 ### EC2 (Docker — full training)
 
@@ -126,9 +91,9 @@ CIS_5190_group_project/
 ├── aligned/             intermediate aligned images
 ├── filtered_aligned/    final one-per-condition aligned images
 ├── hf_dataset/          Hugging Face ImageFolder export
-├── checkpoints/
-├── outputs/
-└── manifest.csv
+├── checkpoints/         Model checkpoints
+├── outputs/             Model validation outputs
+└── manifest.csv         Info on model data
 ```
 
 Raw filenames should follow:
@@ -150,11 +115,9 @@ The optional trailing `_ai` marks synthetic images and is recorded in `manifest.
 
 ## Main Preprocessing Workflow
 
-Run [notebooks/00_preprocess_and_align.ipynb](notebooks/00_preprocess_and_align.ipynb) in Colab for visual debugging, or run the equivalent cluster/local CLI:
-
 ```bash
 python scripts/preprocess.py \
-  --base /path/to/CIS_5190_group_project \
+  --base /path/to/image-style-transfer \
   --redo-all
 ```
 
@@ -171,29 +134,8 @@ The preprocessing pipeline performs the full sequence:
 7. Writes final images under `filtered_aligned/`.
 8. Exports `hf_dataset/images/` and `hf_dataset/metadata.jsonl` for diffusion fine-tuning.
 
-The main notebook control flags are in the configuration cell:
 
-```python
-REDO_PREPROCESS = True
-REDO_ALIGNMENT = True
-REDO_FILTERED = True
-REDO_HF_DATASET = True
-OUTPUT_SIZE = 512
-MIN_SHARED_CROP_AREA_RATIO = 0.50
-```
-
-When a `REDO_*` flag is `True`, the corresponding output folder is replaced. When it is `False`, the notebook checks whether the expected files already exist and skips completed work; rerun stages create missing directories and use unique output names instead of deleting existing image folders.
-
-The script exposes equivalent flags:
-
-```bash
-python scripts/preprocess.py --base /path/to/project --redo-preprocess
-python scripts/preprocess.py --base /path/to/project --redo-alignment
-python scripts/preprocess.py --base /path/to/project --redo-filtered
-python scripts/preprocess.py --base /path/to/project --redo-hf-dataset
-```
-
-## Manifest
+### Manifest
 
 `manifest.csv` is the source of truth for preprocessing outcomes. It contains all uploaded images, including failed or dropped rows.
 
@@ -221,54 +163,10 @@ status
 drop_reason
 ```
 
-Use `status == "kept"` for the final training images. Other statuses explain what happened to non-final images, such as `alignment_failed`, `crop_dropped`, or `duplicate_filtered`.
-
-For alignment and crop auditing, `anchor_file` records the processed image used as the location-group anchor, and `crop_area_ratio` records the retained shared crop area relative to that anchor. These fields make it easier to review `crop_dropped` and `alignment_failed` rows later.
-
-## Hugging Face Dataset
-
-The final diffusion dataset is exported by `00_preprocess_and_align.ipynb` or `scripts/preprocess.py`:
-
-```
-hf_dataset/
-├── metadata.jsonl
-└── images/
-    └── *.jpg
-```
-
-`metadata.jsonl` uses the standard ImageFolder format:
-
-```json
-{"file_name": "images/agh3rd_day_cloudy.jpg", "text": "A photo of Agh3rd on the University of Pennsylvania campus at day, cloudy weather"}
-```
-
-Only rows with `status == "kept"` are exported.
-
-## Optional Training
-
-After preprocessing finishes, [notebooks/01_trainingipynb](notebooks/01_training.ipynb) can validate the manifest/HF dataset and run optional LoRA or ControlNet training from Colab.
-
-For LoRA training, the relevant dataset path is:
-
-```
-CIS_5190_group_project/hf_dataset
-```
-
-The notebook writes training checkpoints under:
-
-```
-CIS_5190_group_project/checkpoints/
-```
-
-## Notes
-
-The old separate preprocessing/alignment notebooks and stale CSV-based scripts have been removed from the active workflow. Use `00_preprocess_and_align.ipynb` for Colab inspection or `scripts/preprocess.py` for cluster/local runs so teammates all use the same manifest-based pipeline.
-
-
 ## Manual Auditing
 
 After pre-processing, you can (optionally) manually audit the hf_dataset output by running this line
-```sh
+```bash
 streamlit run scripts/audit_app.py -- \
         --dataset_dir hf_dataset \
         --manifest_csv hf_dataset/metadata.csv \
@@ -276,13 +174,13 @@ streamlit run scripts/audit_app.py -- \
 ```
 
 
-## Run the Inference/Evaluate Steps
-We used Vscode to execute the inference/evaluate notebooks on the EC2 instances/locally, but to run it without Vscode,
-you can install `papermill` to run the notebooks locally and get the output files.
+## Run the Training/Inference/Evaluate Steps
+We used Vscode to execute the inference/evaluate notebooks on the EC2 instances/locally, but to run it without Vscode, you can install `papermill` to run the notebooks on the command line and get the output files.  
 
-```
+```bash
 uv add papermill
 cd notebooks/
-papermill 02_inference.ipynb out1.ipynb --log-output
-papermill 03_evaluate.ipynb out2.ipynb --log-output
+papermill 01_training.ipynb out1.ipynb --log_output
+papermill 02_inference.ipynb out2.ipynb --log-output
+papermill 03_evaluate.ipynb out3.ipynb --log-output
 ```
