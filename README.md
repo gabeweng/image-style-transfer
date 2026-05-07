@@ -35,7 +35,7 @@ pip install -r requirements.txt
 ```
 
 ### Colab Setup
-The Colab notebooks install their own runtime dependencies. Note that the active preprocessing pipeline expects the project. It does expect that within `MyDrive` folder of Google Drive, we have a folder called `CIS_5190_group_project/Images` that has all the images within our training set.
+The Colab notebooks install their own runtime dependencies. Note that the active preprocessing pipeline expects that within `MyDrive` folder of Google Drive, we have a folder called `CIS_5190_group_project/Images` that has all the images within our training set.
 
 The Colab notebooks install their own runtime dependencies with `uv pip install --system` before mounting Google Drive, so all you'd need to do is run the Colab. If you're on Colab, run the notebooks in numerical order and it should work. Ignore all other running instructions below. 
 
