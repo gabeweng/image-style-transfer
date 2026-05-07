@@ -199,6 +199,6 @@ validation_set/
 │   ├── 01_daytime_cloudy.png
 │   ├── 01_daytime_sunny.png
 ├── 02/
-│   ├── 02_night_cloudy.py                y                
+│   ├── 02_night_cloudy.py                              
 │   └── 02_daytime_rainy.py    
 ```
