@@ -188,4 +188,17 @@ papermill 03_evaluate.ipynb out3.ipynb --log-output
 
 
 ## TA Validation 
-For `05_ta_validation.ipynb`, you want to edit `TA_VALIDATION_PATH` variable to lead to the path of the validation set. 
+For `05_ta_validation.ipynb`, you want to edit `TA_VALIDATION_PATH` variable to lead to the path of the validation set and run the module. Outputs should be in `outputs/` folder.
+
+Note that we do expect that each file has the format `something_[time_of_day]_location.jpeg`
+
+The general format should be 
+```
+validation_set/
+├── 01/
+│   ├── 01_daytime_cloudy.png
+│   ├── 01_daytime_sunny.png
+├── 02/
+│   ├── 02_night_cloudy.py                y                
+│   └── 02_daytime_rainy.py    
+```
