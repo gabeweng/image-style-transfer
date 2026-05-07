@@ -37,7 +37,8 @@ pip install -r requirements.txt
 ### Colab Setup
 The Colab notebooks install their own runtime dependencies. Note that the active preprocessing pipeline expects that within `MyDrive` folder of Google Drive, we have a folder called `CIS_5190_group_project/Images` that has all the images within our training set.
 
-The Colab notebooks install their own runtime dependencies with `uv pip install --system` before mounting Google Drive, so all you'd need to do is run the Colab. If you're on Colab, run the notebooks in numerical order and it should work. Ignore all other running instructions below. 
+The Colab notebooks install their own runtime dependencies with `uv pip install --system` before mounting Google Drive, so all you'd need to do is run the Colab. If you're on Colab, run the notebooks in numerical order (00, 01, 02, 03) and it should work. Ignore all other running instructions below. 
+
 
 **Note**: The full pipeline hasn't been tested on Colab.
 
@@ -184,3 +185,7 @@ papermill 01_training.ipynb out1.ipynb --log_output
 papermill 02_inference.ipynb out2.ipynb --log-output
 papermill 03_evaluate.ipynb out3.ipynb --log-output
 ```
+
+
+## TA Validation 
+For `05_ta_validation.ipynb`, you want to edit `TA_VALIDATION_PATH` variable to lead to the path of the validation set. 
